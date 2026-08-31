@@ -34,9 +34,17 @@ func AgentTagEnabled() bool {
 
 // Budgets in words of prose, fenced code excluded. An issue body carries a mechanism, its
 // evidence, the exposure and the fix; a comment carries one of those.
+//
+// SummaryBudget covers a title field rather than a body — Jira's `summary`, the one tracker field
+// this gate sees that has no Linear counterpart it forwards (Linear's title is never extracted).
+// 20 is measured, not chosen: across 100 consecutively filed SRE and RE issues, summary length ran
+// p50 11 words, p90 16, max 28. A cap at the p90 would deny six of that hundred, four of which
+// read as correctly sized; 20 denies the two that put a whole finding in the title. The field's own
+// hard ceiling is Jira's 255 characters, which nothing in that sample came within 45 of.
 const (
 	IssueBudget   = 150
 	CommentBudget = 120
+	SummaryBudget = 20
 	// Below this, section headers cost more lines than the structure they buy.
 	headerFloor = 200
 )
@@ -84,14 +92,27 @@ const slots = `Four slots, in this order:
   4. The fix, as a code block, plus one line on how to prove it can go red.
 SHAs and file:line carry the detail; do not narrate what the reader can open.`
 
-// BudgetFor applies the TICKETVOICE_MAX_WORDS override, shared by every caller of this package.
-func BudgetFor(base int) int {
-	if v := os.Getenv("TICKETVOICE_MAX_WORDS"); v != "" {
+// envWords reads a positive word count from an environment variable, falling back to base. A
+// value that is absent, unparseable, or non-positive leaves the compiled budget in place.
+func envWords(envVar string, base int) int {
+	if v := os.Getenv(envVar); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
 		}
 	}
 	return base
+}
+
+// BudgetFor applies the TICKETVOICE_MAX_WORDS override, shared by every caller of this package.
+func BudgetFor(base int) int {
+	return envWords("TICKETVOICE_MAX_WORDS", base)
+}
+
+// SummaryBudgetFor applies TICKETVOICE_MAX_SUMMARY_WORDS. A title and a body are not the same
+// thing to loosen: raising the body budget because a ticket needs room should not silently buy a
+// 40-word title, so the summary carries its own override rather than riding on TICKETVOICE_MAX_WORDS.
+func SummaryBudgetFor() int {
+	return envWords("TICKETVOICE_MAX_SUMMARY_WORDS", SummaryBudget)
 }
 
 // Evaluate is the one check every caller runs through: same budget math, same reason text. over
@@ -110,6 +131,19 @@ func Evaluate(text, kind string, budget int) (over bool, reason string) {
 			h, headerFloor)
 	}
 	return true, reason
+}
+
+// EvaluateSummary is Evaluate for a title field. The count and the cap, and nothing else: the
+// four-slot template tells the writer to structure a body, and a one-line summary has no slots to
+// fill — told to add sections, Claude would put markdown headers in a Jira title. The header nag
+// is dropped for the same reason.
+func EvaluateSummary(text string, budget int) (over bool, reason string) {
+	words := ProseWords(text)
+	if words <= budget {
+		return false, ""
+	}
+	return true, fmt.Sprintf("This summary is %d words against a %d-word budget — %d over. Say what broke, not what it implies.",
+		words, budget, words-budget)
 }
 
 // Judgment is what a sibling scorer found. Flagged false and Note "" both mean "nothing to add" —

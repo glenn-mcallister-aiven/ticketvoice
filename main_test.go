@@ -170,9 +170,8 @@ func TestGhWriteProseReadsRedirectFile(t *testing.T) {
 // Bash command carrying one instead of a heredoc is *ignored*, not misread as an empty body that
 // would pass every budget silently.
 func TestExtractProseIgnoresNonGhWriteBash(t *testing.T) {
-	text, budget, kind := extractProse("Bash", json.RawMessage(`{"command":"ls -la"}`), "")
-	if text != "" || budget != 0 || kind != "" {
-		t.Fatalf("want no prose for an unrelated Bash command, got (%q, %d, %q)", text, budget, kind)
+	if got := extractProse("Bash", json.RawMessage(`{"command":"ls -la"}`), ""); len(got) != 0 {
+		t.Fatalf("want no prose for an unrelated Bash command, got %+v", got)
 	}
 }
 
@@ -462,5 +461,202 @@ func TestRunCheckAcceptsReadmeWhySection(t *testing.T) {
 	}
 	if over, reason := evaluate(body, "issue description", defaultIssueBudget); over {
 		t.Fatalf("README's Why section no longer fits its own budget: %s", reason)
+	}
+}
+
+// --- Jira (Atlassian MCP) ---
+
+// The four write tools, three field shapes. editJiraIssue is the one that nests, and the one that
+// most often carries no prose at all.
+func TestJiraProseSelectsFieldsAndBudgetsPerTool(t *testing.T) {
+	type want struct {
+		kind   string
+		text   string
+		budget int
+	}
+	for _, tc := range []struct {
+		name, tool, raw string
+		want            []want
+	}{
+		{"create carries title and body", "mcp__atlassian__createJiraIssue",
+			`{"cloudId":"c","projectKey":"RE","summary":"disk fills","description":"the body"}`,
+			[]want{{"summary", "disk fills", defaultSummaryBudget}, {"issue description", "the body", defaultIssueBudget}}},
+		{"create with no description", "mcp__atlassian__createJiraIssue",
+			`{"cloudId":"c","projectKey":"RE","summary":"disk fills"}`,
+			[]want{{"summary", "disk fills", defaultSummaryBudget}}},
+		{"edit reads the nested fields map", "mcp__atlassian__editJiraIssue",
+			`{"issueIdOrKey":"RE-1","fields":{"summary":"new title","description":"new body"}}`,
+			[]want{{"summary", "new title", defaultSummaryBudget}, {"issue description", "new body", defaultIssueBudget}}},
+		{"edit touching no prose", "mcp__atlassian__editJiraIssue",
+			`{"issueIdOrKey":"RE-1","fields":{"labels":["bug"],"resolution":null}}`, nil},
+		{"comment", "mcp__atlassian__addCommentToJiraIssue",
+			`{"issueIdOrKey":"RE-1","commentBody":"one point"}`,
+			[]want{{"comment", "one point", defaultCommentBudget}}},
+		{"worklog comment", "mcp__atlassian__addWorklogToJiraIssue",
+			`{"issueIdOrKey":"RE-1","timeSpent":"2h","commentBody":"one point"}`,
+			[]want{{"worklog comment", "one point", defaultCommentBudget}}},
+		{"unwatched atlassian tool", "mcp__atlassian__getJiraIssue",
+			`{"issueIdOrKey":"RE-1"}`, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractProse(tc.tool, json.RawMessage(tc.raw), "")
+			if len(got) != len(tc.want) {
+				t.Fatalf("want %d field(s), got %d: %+v", len(tc.want), len(got), got)
+			}
+			for i, w := range tc.want {
+				if got[i].Kind != w.kind || got[i].Text != w.text || got[i].Budget != w.budget {
+					t.Fatalf("field %d: want (%q, %q, %d), got (%q, %q, %d)",
+						i, w.kind, w.text, w.budget, got[i].Kind, got[i].Text, got[i].Budget)
+				}
+			}
+		})
+	}
+}
+
+// An ADF body is a JSON object where the schema also allows a string. Typed as a string it would
+// fail the unmarshal for the whole call and take the summary check down with it; the point of the
+// json.RawMessage fields is that it doesn't.
+func TestJiraAdfDescriptionFallsThroughButSummaryStillChecked(t *testing.T) {
+	raw := `{"cloudId":"c","projectKey":"RE","summary":"disk fills","contentFormat":"adf",` +
+		`"description":{"type":"doc","version":1,"content":[{"type":"paragraph"}]}}`
+	got := extractProse("mcp__atlassian__createJiraIssue", json.RawMessage(raw), "")
+	if len(got) != 1 || got[0].Kind != "summary" {
+		t.Fatalf("want the summary alone, got %+v", got)
+	}
+}
+
+// 20 words is the measured cap (see budgetgate.SummaryBudget). SRE-12460's real 28-word summary is
+// the shape it exists to deny: a whole finding in the title.
+func TestJiraSummaryBudgetBoundary(t *testing.T) {
+	if over, _ := evaluateField(proseField{Text: words(20), Kind: "summary", Budget: defaultSummaryBudget}); over {
+		t.Fatal("20 words must be within the summary budget")
+	}
+	if over, _ := evaluateField(proseField{Text: words(21), Kind: "summary", Budget: defaultSummaryBudget}); !over {
+		t.Fatal("21 words must be over the summary budget")
+	}
+	real28 := "OpenSearchRestoreProgressAge.md Case 10 authorises force-deleting the last old-generation node " +
+		"without an explicit pass condition, a replica check or a recovery check, which loses data on a " +
+		"zero-replica cluster"
+	over, reason := evaluateField(proseField{Text: real28, Kind: "summary", Budget: defaultSummaryBudget})
+	if !over {
+		t.Fatalf("a 28-word summary must be denied, got %d words within budget", proseWords(real28))
+	}
+	// The four-slot template tells a writer to structure a body. Told that about a title, Claude
+	// puts markdown headers in a Jira summary.
+	if strings.Contains(reason, "Four slots") {
+		t.Fatalf("a summary denial must not carry the body template: %q", reason)
+	}
+}
+
+// TICKETVOICE_MAX_WORDS loosening a body must not silently buy a 40-word title.
+func TestJiraSummaryOverrideIsSeparateFromBodyOverride(t *testing.T) {
+	t.Setenv("TICKETVOICE_MAX_WORDS", "400")
+	if over, _ := evaluateField(proseField{Text: words(25), Kind: "summary", Budget: defaultSummaryBudget}); !over {
+		t.Fatal("the body override must not raise the summary budget")
+	}
+	t.Setenv("TICKETVOICE_MAX_SUMMARY_WORDS", "30")
+	if over, _ := evaluateField(proseField{Text: words(25), Kind: "summary", Budget: defaultSummaryBudget}); over {
+		t.Fatal("TICKETVOICE_MAX_SUMMARY_WORDS must raise the summary budget")
+	}
+}
+
+// Both fields are checked before anything is reported, so one denial carries both counts and Claude
+// doesn't discover the second on a retry.
+func TestRunHookDeniesJiraCreateOnBothFieldsAtOnce(t *testing.T) {
+	clean(t)
+	raw := []byte(`{"tool_name":"mcp__atlassian__createJiraIssue","tool_input":{"cloudId":"c","projectKey":"RE",` +
+		`"summary":"` + words(30) + `","description":"` + words(200) + `"}}`)
+	out := runHookWithInput(raw)
+	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("want deny, got %+v", out)
+	}
+	reason := out.HookSpecificOutput.PermissionDecisionReason
+	if !strings.Contains(reason, "This summary is 30 words") || !strings.Contains(reason, "200 words") {
+		t.Fatalf("reason must carry both counts: %q", reason)
+	}
+}
+
+// The tag goes on the body, never the title: four characters out of a 20-word budget, spent in
+// every board view. Every field this hook never parses has to round-trip, since updatedInput
+// replaces the whole object rather than merging into it.
+func TestRunHookTagsJiraDescriptionNotSummary(t *testing.T) {
+	clean(t)
+	raw := []byte(`{"tool_name":"mcp__atlassian__createJiraIssue","tool_input":{"cloudId":"c","projectKey":"RE",` +
+		`"issueTypeName":"Bug","summary":"disk fills","description":"the body"}}`)
+	out := runHookWithInput(raw)
+	if out == nil || out.HookSpecificOutput.PermissionDecision != "allow" {
+		t.Fatalf("want a tagged allow, got %+v", out)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["description"] != "🤖 "+"the body" {
+		t.Fatalf("description must carry the tag, got %q", got["description"])
+	}
+	if got["summary"] != "disk fills" {
+		t.Fatalf("summary must be untouched, got %q", got["summary"])
+	}
+	for _, k := range []string{"cloudId", "projectKey", "issueTypeName"} {
+		if _, ok := got[k]; !ok {
+			t.Fatalf("%s must round-trip through updatedInput", k)
+		}
+	}
+}
+
+// An edit replacing a whole description is a fresh post in a field, not a patch, so it is tagged —
+// and the sibling keys inside `fields` are values this hook does not understand and must not drop.
+func TestRunHookTagsNestedJiraEditDescription(t *testing.T) {
+	clean(t)
+	raw := []byte(`{"tool_name":"mcp__atlassian__editJiraIssue","tool_input":{"cloudId":"c","issueIdOrKey":"RE-1",` +
+		`"fields":{"description":"the body","labels":["bug"]}}}`)
+	out := runHookWithInput(raw)
+	if out == nil || out.HookSpecificOutput.PermissionDecision != "allow" {
+		t.Fatalf("want a tagged allow, got %+v", out)
+	}
+	var got struct {
+		IssueIDOrKey string `json:"issueIdOrKey"`
+		Fields       struct {
+			Description string   `json:"description"`
+			Labels      []string `json:"labels"`
+		} `json:"fields"`
+	}
+	if err := json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Fields.Description != "🤖 "+"the body" {
+		t.Fatalf("fields.description must carry the tag, got %q", got.Fields.Description)
+	}
+	if len(got.Fields.Labels) != 1 || got.IssueIDOrKey != "RE-1" {
+		t.Fatalf("sibling keys must round-trip, got %+v", got)
+	}
+}
+
+// A Jira comment is in no shape either sibling can read on its own — this is the test that would
+// catch the bridge being dropped, which would silently leave the Jira path budget-only.
+func TestRunHookBridgesJiraCommentToSiblings(t *testing.T) {
+	t.Setenv("TICKETVOICE_COPE_GATE", fakeSiblingBinary(t, "cope-gate", ""))
+	t.Setenv("TICKETVOICE_BASANITE", fakeSiblingBinary(t, "basanite", "load-bearing ×1 → supporting"))
+	raw := []byte(`{"tool_name":"mcp__atlassian__addCommentToJiraIssue","tool_input":{"issueIdOrKey":"RE-1",` +
+		`"commentBody":"` + words(20) + `"}}`)
+	out := runHookWithInput(raw)
+	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("a basanite-flagged Jira comment must be denied, got %+v", out)
+	}
+	if !strings.Contains(out.HookSpecificOutput.PermissionDecisionReason, "load-bearing") {
+		t.Fatalf("reason must carry basanite's finding: %q", out.HookSpecificOutput.PermissionDecisionReason)
+	}
+}
+
+// The summary is never forwarded (siblingStdin): cope scores paragraph structure and a title is not
+// a paragraph. A create carrying only a summary has nothing to forward, so a sibling that would
+// flag anything it were handed must not be reached at all.
+func TestRunHookDoesNotForwardASummaryToSiblings(t *testing.T) {
+	t.Setenv("TICKETVOICE_COPE_GATE", fakeSiblingBinary(t, "cope-gate", "dangling_end: 1 violation(s)"))
+	t.Setenv("TICKETVOICE_BASANITE", fakeSiblingBinary(t, "basanite", "load-bearing ×1 → supporting"))
+	raw := []byte(`{"tool_name":"mcp__atlassian__createJiraIssue","tool_input":{"cloudId":"c","projectKey":"RE",` +
+		`"summary":"` + words(10) + `"}}`)
+	if out := runHookWithInput(raw); out != nil {
+		t.Fatalf("a summary-only create must reach no sibling and produce no output, got %+v", out)
 	}
 }

@@ -5,15 +5,17 @@
 A Claude Code `PreToolUse` hook that gates ticket prose through
 [cope](https://github.com/justinstimatze/cope) (voicing and structure) and
 [basanite](https://github.com/justinstimatze/basanite) (vocabulary tics) before it posts. Behind
-both sits a word budget — 150 words for an issue or PR description, 120 for a comment, fenced code
-excluded — as a narrower backstop: neither cope nor basanite is built to score sheer length,
-independent of register or vocabulary. Any of the three flagging a body returns
+both sits a word budget — 150 words for an issue or PR description, 120 for a comment, 20 for a Jira
+summary, fenced code excluded — as a narrower backstop: neither cope nor basanite is built to score
+sheer length, independent of register or vocabulary. Any of the three flagging a body returns
 `permissionDecision: "deny"` — the reason goes to Claude, not a human, so it rewrites and retries on
-its own instead of paging anyone. No prompt when a body clears all three — on Linear it still tags
-the body as agent-authored before letting it through; see [Agent tag](#agent-tag).
+its own instead of paging anyone. No prompt when a body clears all three — on Linear and Jira it
+still tags the body as agent-authored before letting it through; see [Agent tag](#agent-tag).
 
-Covers two surfaces: Linear, via its MCP tools' structured `description`/`body` fields — issues,
-comments, and PR-review-thread ("diff") comments and reviews — and GitHub issues/PRs, via
+Covers three surfaces: Linear, via its MCP tools' structured `description`/`body` fields — issues,
+comments, and PR-review-thread ("diff") comments and reviews; Jira, via the Atlassian MCP's
+`summary`, `description` and `commentBody` — issues, comments and worklog comments, with the title
+budgeted apart from the body; and GitHub issues/PRs, via
 [`gh-write`](#gh-write-github-issues-and-prs) — a thin wrapper this repo also builds, which is the
 only way this hook can see a GitHub body at all (see that section for why a plain
 `gh issue create --body "..."` can't be gated).
@@ -72,16 +74,16 @@ make install   # builds ticketvoice and gh-write to $(go env GOPATH)/bin, versio
 ```
 
 Then wire `ticketvoice` into `~/.claude/settings.json` as a `PreToolUse` hook on the four Linear
-write tools and on `Bash` (for `gh-write` calls — see below). The path has to be absolute — hooks
-run in whatever environment Claude Code was launched from, which may not have your Go bin
-directory on `PATH`:
+write tools, the four Jira ones, and on `Bash` (for `gh-write` calls — see below). The path has to
+be absolute — hooks run in whatever environment Claude Code was launched from, which may not have
+your Go bin directory on `PATH`:
 
 ```json
 {
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "mcp__linear__save_issue|mcp__linear__save_comment|mcp__linear__save_diff_comment|mcp__linear__submit_diff_review|Bash",
+        "matcher": "mcp__linear__save_issue|mcp__linear__save_comment|mcp__linear__save_diff_comment|mcp__linear__submit_diff_review|mcp__atlassian__createJiraIssue|mcp__atlassian__editJiraIssue|mcp__atlassian__addCommentToJiraIssue|mcp__atlassian__addWorklogToJiraIssue|Bash",
         "hooks": [
           { "type": "command", "command": "/home/you/go/bin/ticketvoice" }
         ]
@@ -90,6 +92,10 @@ directory on `PATH`:
   }
 }
 ```
+
+Drop whichever tracker you don't use from the matcher. The Jira tools left out are the ones that
+carry no prose — `transitionJiraIssue`, `createIssueLink` and the rest — where the hook would have
+nothing to check.
 
 There's no installer subcommand — this is a plain hook binary, wired by hand once. Matching on
 `Bash` runs ticketvoice on every Bash call, but it's a fast regex check that returns immediately
@@ -151,6 +157,10 @@ Either way Claude gets the same reason text and no result but "retry shorter," w
 has no effect on cope or basanite's own verdicts. Set it in the hook's environment:
 `TICKETVOICE_MAX_WORDS=200`.
 
+`TICKETVOICE_MAX_SUMMARY_WORDS` does the same for a Jira summary, separately. A title and a body are
+not the same thing to loosen: giving a ticket room for a longer body shouldn't silently buy a
+40-word title.
+
 `TICKETVOICE_COPE_GATE` and `TICKETVOICE_BASANITE` point at those binaries if they aren't on `PATH`.
 Missing or unreachable is not an error for either — the call just isn't scored against that sibling's
 rules that time.
@@ -163,6 +173,19 @@ Prose only — ticketvoice strips fenced code before counting, since code is the
 that's supposed to be long. A patch-based edit is counted on its inserted text alone; it leaves the
 rest of the body alone. Below 200 words, a body with section headers gets an extra line in the
 reason: headers cost two lines each and imply more document than there is.
+
+A Jira summary is counted against its own 20-word budget, which is measured rather than chosen:
+across 100 consecutively filed issues, summary length ran p50 11 words, p90 16, max 28. A cap at the
+p90 would have denied six of that hundred, four of which read as correctly sized; 20 denies the two
+that put a whole finding in the title. Its denial reason carries the count and the cap and nothing
+else — the four-slot body template tells a writer to structure a body, and told that about a title,
+Claude puts markdown headers in a Jira summary.
+
+A Jira create and a Jira edit each carry a title and a body under separate budgets, and both are
+checked before anything is reported, so a call over on both is denied once with both counts rather
+than making Claude discover the second on a retry. A body sent as ADF (`contentFormat: "adf"`) is a
+JSON document object rather than a string, and isn't counted: pulling text leaves out of a node tree
+isn't worth it while the MCP's default is Markdown. The summary on the same call is still checked.
 
 ## Agent tag
 
@@ -181,6 +204,14 @@ the real schema carries that this hook never parses) round-trips untouched, sinc
 replaces the whole object rather than merging into it. A patch (`save_issue` editing an existing
 description) isn't tagged: it's a diff against prose already tagged once, not a fresh post.
 
+Jira works the same way, with two differences. The tag goes on the body and never on the `summary`:
+four characters out of a 20-word budget is real, and a board or list view showing a truncated title
+is the worst place to spend them, while the body is where a reader who has actually opened the ticket
+sees the provenance. And an `editJiraIssue` nests every field it sets under `fields`, so the tag goes
+on `fields.description` — a full description replacement is a fresh post into a field, not a patch,
+and the already-tagged check keeps a second edit from stacking a second marker. A field holding ADF
+rather than a string isn't tagged: there is no correct place to put a prefix in a node tree.
+
 ## Where this sits next to cope and basanite
 
 [cope](https://github.com/justinstimatze/cope) and
@@ -192,6 +223,15 @@ verdict into a gate: it forwards its own stdin to `cope-gate -pretool` and
 budget — so a within-budget ticket carrying a flagged tic gets sent back to Claude the same as an
 over-length one. See [CHANGELOG.md](CHANGELOG.md) for how basanite's dedup state made this need a
 new flag on its side.
+
+Neither sibling's matcher reaches Jira either, and adding it wouldn't help: basanite reads a flat
+`file_path`/`content`/`new_string`/`body`/`description` input, which has no case for `commentBody`
+and can't reach a level into `fields.description`. So ticketvoice's forward is the *only* path by
+which Jira prose reaches either binary, and rather than the raw stdin it sends the body through
+`budgetgate.LinearPayload` — the same bridge gh-write uses — in a shape both siblings already read.
+The summary isn't forwarded, matching Linear, whose title never is: cope scores paragraph structure,
+which a one-line title standing in for a paragraph would skew. A call carrying only a summary reaches
+neither sibling, and its budget is the whole check.
 
 Neither sibling's own matcher reaches `Bash`, so a GitHub write is never scored through their
 independently-registered hooks the way a Linear call is. It's scored twice over by two other

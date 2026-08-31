@@ -83,8 +83,32 @@ type linearInput struct {
 	} `json:"patch"`
 }
 
+// jiraInput is the Atlassian MCP's shape across the four write tools this hook watches. Every
+// prose field is json.RawMessage rather than string deliberately: `description` and both
+// `commentBody` fields accept either a Markdown string or an ADF document object, chosen by the
+// call's contentFormat, so typing them as string would make one ADF body fail the unmarshal for
+// the whole call and lose the summary check with it. jsonString yields "" for anything that isn't
+// a string, which drops an ADF field through as "nothing to check" while the plain-string fields
+// on the same call are still read. Walking an ADF tree for its text leaves is left undone, the
+// same call the repo already makes on a Linear patch op list.
+type jiraInput struct {
+	Summary     json.RawMessage            `json:"summary"`
+	Description json.RawMessage            `json:"description"`
+	CommentBody json.RawMessage            `json:"commentBody"`
+	Fields      map[string]json.RawMessage `json:"fields"`
+}
+
 type bashInput struct {
 	Command string `json:"command"`
+}
+
+// proseField is one checkable field out of a single tool call. A Jira create or edit carries two
+// independent ones — a title under its own budget and a body under another — which is why
+// extraction returns a slice rather than the one field a Linear write ever has.
+type proseField struct {
+	Text   string
+	Kind   string
+	Budget int
 }
 
 type hookOutput struct {
@@ -129,6 +153,46 @@ func prose(tool string, raw json.RawMessage) (text string, budget int, kind stri
 		}
 	}
 	return "", 0, ""
+}
+
+// jsonString reads a prose field that the Atlassian schema types as "string or ADF object".
+// Anything that is not a JSON string — an ADF document, a null, an absent key — yields "".
+func jsonString(raw json.RawMessage) string {
+	var s string
+	if len(raw) == 0 || json.Unmarshal(raw, &s) != nil {
+		return ""
+	}
+	return s
+}
+
+// jiraProse pulls every prose field a Jira write carries, each under the budget for its own kind.
+// A create and an edit both carry a title and a body, checked in one pass so that a call over on
+// both is denied once with both counts, rather than making Claude discover the second on a retry.
+//
+// editJiraIssue nests everything under `fields`, keyed by Jira field name, which is why that one
+// reads a map instead of named struct fields — an edit is also the call most likely to touch no
+// prose at all (a label, an assignee, a resolution), and one that touches none yields nothing and
+// leaves the hook silent.
+func jiraProse(tool string, in jiraInput) []proseField {
+	var out []proseField
+	add := func(text, kind string, budget int) {
+		if text != "" {
+			out = append(out, proseField{Text: text, Kind: kind, Budget: budget})
+		}
+	}
+	switch tool {
+	case "mcp__atlassian__createJiraIssue":
+		add(jsonString(in.Summary), "summary", budgetgate.SummaryBudget)
+		add(jsonString(in.Description), "issue description", budgetgate.IssueBudget)
+	case "mcp__atlassian__editJiraIssue":
+		add(jsonString(in.Fields["summary"]), "summary", budgetgate.SummaryBudget)
+		add(jsonString(in.Fields["description"]), "issue description", budgetgate.IssueBudget)
+	case "mcp__atlassian__addCommentToJiraIssue":
+		add(jsonString(in.CommentBody), "comment", budgetgate.CommentBudget)
+	case "mcp__atlassian__addWorklogToJiraIssue":
+		add(jsonString(in.CommentBody), "worklog comment", budgetgate.CommentBudget)
+	}
+	return out
 }
 
 var (
@@ -233,23 +297,34 @@ func ghWriteProse(command, cwd string) (text, kind string, budget int, ok bool) 
 	return "", "", 0, false
 }
 
-// extractProse dispatches on the calling tool: Linear's MCP tools carry a structured
-// description/body field (prose, above), a Bash call carries an opaque command string
-// that only a gh-write invocation makes readable (ghWriteProse, above). Any other tool
-// yields no prose to check.
-func extractProse(tool string, raw json.RawMessage, cwd string) (text string, budget int, kind string) {
-	if tool == "Bash" {
+// extractProse dispatches on the calling tool, one tracker per branch: Linear's MCP tools carry a
+// structured description/body field (prose, above), Jira's carry a title and a body that are
+// budgeted apart (jiraProse, above), and a Bash call carries an opaque command string that only a
+// gh-write invocation makes readable (ghWriteProse, above). Any other tool yields nothing to check.
+func extractProse(tool string, raw json.RawMessage, cwd string) []proseField {
+	switch {
+	case tool == "Bash":
 		var b bashInput
 		if json.Unmarshal(raw, &b) != nil {
-			return "", 0, ""
+			return nil
 		}
 		t, k, bud, ok := ghWriteProse(b.Command, cwd)
 		if !ok {
-			return "", 0, ""
+			return nil
 		}
-		return t, bud, k
+		return []proseField{{Text: t, Kind: k, Budget: bud}}
+	case strings.HasPrefix(tool, "mcp__atlassian__"):
+		var in jiraInput
+		if json.Unmarshal(raw, &in) != nil {
+			return nil
+		}
+		return jiraProse(tool, in)
 	}
-	return prose(tool, raw)
+	text, budget, kind := prose(tool, raw)
+	if text == "" {
+		return nil
+	}
+	return []proseField{{Text: text, Kind: kind, Budget: budget}}
 }
 
 // The budget check, sibling forwarding, and their word-counting live in internal/budgetgate now
@@ -259,6 +334,7 @@ func extractProse(tool string, raw json.RawMessage, cwd string) (text string, bu
 const (
 	defaultIssueBudget   = budgetgate.IssueBudget
 	defaultCommentBudget = budgetgate.CommentBudget
+	defaultSummaryBudget = budgetgate.SummaryBudget
 )
 
 func proseWords(s string) int { return budgetgate.ProseWords(s) }
@@ -269,54 +345,140 @@ func evaluate(text, kind string, budget int) (bool, string) {
 func judgeCope(rawStdin []byte) budgetgate.Judgment     { return budgetgate.JudgeCope(rawStdin) }
 func judgeBasanite(rawStdin []byte) budgetgate.Judgment { return budgetgate.JudgeBasanite(rawStdin) }
 
-// linearTagField names the tool_input field taggedLinearInput should rewrite for a given Linear
-// tool call and prose kind, or "" when there's none: a Bash call (GitHub's tag is gh-write's own
-// job, and "description"/"body" mean nothing on a command string) or a patch (a diff against an
-// existing description, not a fresh post — there's no single field a prefix belongs on).
-func linearTagField(tool, kind string) string {
-	if !strings.HasPrefix(tool, "mcp__linear__") {
-		return ""
+// evaluateField resolves a field's budget and checks it. Resolution can't be one call for every
+// kind: a summary carries its own override, deliberately not riding on TICKETVOICE_MAX_WORDS, and
+// its denial reason is its own too — see budgetgate.EvaluateSummary.
+func evaluateField(f proseField) (bool, string) {
+	if f.Kind == "summary" {
+		return budgetgate.EvaluateSummary(f.Text, budgetgate.SummaryBudgetFor())
 	}
-	switch kind {
-	case "issue description":
-		return "description"
-	case "comment", "diff comment", "diff review":
-		return "body"
-	}
-	return ""
+	return evaluate(f.Text, f.Kind, budgetFor(f.Budget))
 }
 
-// taggedLinearInput returns the original Linear tool_input with the agent tag prepended to the
-// one field that carries prose — as a full replacement object, since Claude Code's updatedInput
-// replaces the whole input rather than merging, so every other field (id, teamId, title, whatever
+// bodyField is the field a message about the call as a whole should name. Extraction appends title
+// before body, so on the two-field calls (a Jira create or edit) the body is last, and on every
+// other call it is the only field there is.
+func bodyField(fields []proseField) proseField { return fields[len(fields)-1] }
+
+// siblingStdin is what the sibling scorers get. A Linear or Bash call is forwarded verbatim: the
+// exact bytes this hook received, in the shape both siblings already read. A Jira call is in no
+// shape either of them can read — `commentBody` is a field name neither has a case for, and
+// `fields.description` is a level deeper than basanite's flat input struct reaches — so its body is
+// bridged through the same LinearPayload gh-write uses to reach these two binaries.
+//
+// The summary is not forwarded. Linear's own title never is, and cope scores paragraph structure —
+// length coefficient of variation, dangling ends — which a one-line title standing in for a
+// paragraph would skew. Its 20-word budget is the control on it. A call carrying only a summary
+// therefore has nothing to forward and returns nil, which skips both subprocesses rather than
+// handing them an empty payload to guess at.
+func siblingStdin(tool string, raw []byte, fields []proseField) []byte {
+	if !strings.HasPrefix(tool, "mcp__atlassian__") {
+		return raw
+	}
+	for _, f := range fields {
+		if f.Kind != "summary" {
+			return budgetgate.LinearPayload(f.Kind, f.Text)
+		}
+	}
+	return nil
+}
+
+// tagPath names the tool_input field taggedInput should rewrite, as a path from the input object's
+// root — one element for a top-level field, two for editJiraIssue, which nests every field it sets
+// under `fields`. nil means there is nothing to tag: a Bash call (GitHub's tag is gh-write's own
+// job, and "description"/"body" mean nothing on a command string), a Linear patch (a diff against
+// an existing description, not a fresh post, so no single field owns the prefix), or a Jira summary.
+//
+// The summary never carries the tag. Four characters out of a 20-word budget is real, and a board
+// or list view showing a truncated title is the worst place to spend them; the body is where a
+// reader who has actually opened the ticket sees the provenance. A Jira edit that replaces a whole
+// description does get tagged — that is a fresh post in a field, not a patch — and the
+// already-tagged guard in taggedInput keeps a second edit from stacking a second marker.
+func tagPath(tool, kind string) []string {
+	switch {
+	case strings.HasPrefix(tool, "mcp__linear__"):
+		switch kind {
+		case "issue description":
+			return []string{"description"}
+		case "comment", "diff comment", "diff review":
+			return []string{"body"}
+		}
+	case tool == "mcp__atlassian__createJiraIssue":
+		if kind == "issue description" {
+			return []string{"description"}
+		}
+	case tool == "mcp__atlassian__editJiraIssue":
+		if kind == "issue description" {
+			return []string{"fields", "description"}
+		}
+	case tool == "mcp__atlassian__addCommentToJiraIssue", tool == "mcp__atlassian__addWorklogToJiraIssue":
+		return []string{"commentBody"}
+	}
+	return nil
+}
+
+// tagField prepends the agent tag to one string field of obj, in place. Reports false and leaves
+// obj alone when the key is absent, already tagged, or holds anything but a JSON string — an ADF
+// document among them, since there is no correct place to put a prefix in a node tree.
+func tagField(obj map[string]json.RawMessage, field string) bool {
+	rawVal, ok := obj[field]
+	if !ok {
+		return false
+	}
+	var val string
+	if json.Unmarshal(rawVal, &val) != nil || strings.HasPrefix(val, budgetgate.AgentTag) {
+		return false
+	}
+	tagged, err := json.Marshal(budgetgate.AgentTag + val)
+	if err != nil {
+		return false
+	}
+	obj[field] = tagged
+	return true
+}
+
+// taggedInput returns the original tool_input with the agent tag prepended to the one field that
+// carries prose — as a full replacement object, since Claude Code's updatedInput replaces the whole
+// input rather than merging, so every other field (id, teamId, cloudId, issueTypeName, whatever
 // else the real schema carries that this hook never parses) has to round-trip untouched. Returns
-// nil when there's nothing to tag (see linearTagField), the tag is disabled, or the input can't
-// be read back as a plain object.
-func taggedLinearInput(tool string, raw json.RawMessage, kind string) json.RawMessage {
+// nil when there's nothing to tag (see tagPath), the tag is disabled, or the input can't be read
+// back as a plain object.
+//
+// A two-element path is editJiraIssue's nested `fields` map, which round-trips the same way the
+// outer object does: the sibling keys of the field being tagged are values this hook does not
+// understand and must not drop.
+func taggedInput(tool string, raw json.RawMessage, kind string) json.RawMessage {
 	if !budgetgate.AgentTagEnabled() {
 		return nil
 	}
-	field := linearTagField(tool, kind)
-	if field == "" {
+	path := tagPath(tool, kind)
+	if len(path) == 0 {
 		return nil
 	}
 	var obj map[string]json.RawMessage
 	if json.Unmarshal(raw, &obj) != nil {
 		return nil
 	}
-	rawVal, ok := obj[field]
-	if !ok {
+
+	switch len(path) {
+	case 1:
+		if !tagField(obj, path[0]) {
+			return nil
+		}
+	case 2:
+		var nested map[string]json.RawMessage
+		if json.Unmarshal(obj[path[0]], &nested) != nil || !tagField(nested, path[1]) {
+			return nil
+		}
+		reNested, err := json.Marshal(nested)
+		if err != nil {
+			return nil
+		}
+		obj[path[0]] = reNested
+	default:
 		return nil
 	}
-	var val string
-	if json.Unmarshal(rawVal, &val) != nil || strings.HasPrefix(val, budgetgate.AgentTag) {
-		return nil
-	}
-	tagged, err := json.Marshal(budgetgate.AgentTag + val)
-	if err != nil {
-		return nil
-	}
-	obj[field] = tagged
+
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return nil
@@ -334,16 +496,37 @@ func runHookWithInput(raw []byte) *hookOutput {
 	if json.Unmarshal(raw, &in) != nil {
 		return nil
 	}
-	text, rawBudget, kind := extractProse(in.ToolName, in.ToolInput, in.Cwd)
-	if text == "" {
+	fields := extractProse(in.ToolName, in.ToolInput, in.Cwd)
+	if len(fields) == 0 {
 		return nil
 	}
-	budget := budgetFor(rawBudget)
-	over, budgetReason := evaluate(text, kind, budget)
 
-	cope := judgeCope(raw)
-	basanite := judgeBasanite(raw)
-	updatedInput := taggedLinearInput(in.ToolName, in.ToolInput, kind)
+	// Every field is checked before anything is reported, so a Jira create over on both its title
+	// and its body is denied once carrying both counts. Reporting the first and stopping would make
+	// Claude find the second on the retry, at the cost of a whole extra round trip.
+	var overReasons []string
+	for _, f := range fields {
+		if over, reason := evaluateField(f); over {
+			overReasons = append(overReasons, reason)
+		}
+	}
+	over := len(overReasons) > 0
+
+	var cope, basanite budgetgate.Judgment
+	if sib := siblingStdin(in.ToolName, raw, fields); sib != nil {
+		cope = judgeCope(sib)
+		basanite = judgeBasanite(sib)
+	}
+
+	// Only one kind per call maps to a taggable field (tagPath returns nil for a summary), so the
+	// first non-nil result is the only one there is.
+	var updatedInput json.RawMessage
+	for _, f := range fields {
+		if u := taggedInput(in.ToolName, in.ToolInput, f.Kind); u != nil {
+			updatedInput = u
+			break
+		}
+	}
 
 	if !over && !cope.Flagged && !basanite.Flagged {
 		if updatedInput == nil {
@@ -358,9 +541,10 @@ func runHookWithInput(raw []byte) *hookOutput {
 
 	var reason string
 	if over {
-		reason = budgetReason
+		reason = strings.Join(overReasons, "\n\n")
 	} else {
-		reason = fmt.Sprintf("This %s is inside the %d-word budget, but a sibling scorer flagged it on the way out.", kind, budget)
+		bf := bodyField(fields)
+		reason = fmt.Sprintf("This %s is inside the %d-word budget, but a sibling scorer flagged it on the way out.", bf.Kind, budgetFor(bf.Budget))
 	}
 	if cope.Flagged {
 		reason += fmt.Sprintf("\n\ncope flagged this:\n\n%s", cope.Note)

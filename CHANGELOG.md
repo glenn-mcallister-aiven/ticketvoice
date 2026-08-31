@@ -1,5 +1,38 @@
 # Changelog
 
+## Jira, as a third tracker — 2026-08-31
+
+The Atlassian MCP's four prose-carrying write tools — `createJiraIssue`, `editJiraIssue`,
+`addCommentToJiraIssue`, `addWorklogToJiraIssue` — now gate the same way Linear's do. What made this
+more than a matcher line is that Jira's field names miss both siblings entirely: basanite reads a
+flat `file_path`/`content`/`new_string`/`body`/`description` input, which has no case for
+`commentBody` and cannot reach a level into `editJiraIssue`'s `fields.description`. Adding the Jira
+tools to basanite's own matcher would fire it and find nothing. So the hook's forward is the only
+path by which Jira prose reaches either binary, and it sends the body through
+`budgetgate.LinearPayload` — the bridge gh-write already used — rather than the raw stdin.
+
+A Jira create and edit each carry a title and a body, which is why extraction now returns a slice of
+fields rather than the one field a Linear write ever has. Both are checked before anything is
+reported, so a call over on both is denied once carrying both counts instead of making Claude find
+the second on a retry. The summary has its own budget at 20 words, measured rather than chosen:
+across 100 consecutively filed issues, length ran p50 11, p90 16, max 28, and a cap at the p90 would
+have denied six of that hundred, four of which read as correctly sized. Its denial reason is its own
+too — the count and the cap, nothing else. Told to fill the four-slot body template, Claude puts
+markdown headers in a Jira title.
+
+Every Jira prose field is typed `json.RawMessage`, not `string`, because the schema accepts either a
+Markdown string or an ADF document object under `contentFormat`. Typed as a string, one ADF body
+would fail the unmarshal for the whole call and take the summary check down with it. An ADF field
+falls through as nothing to check, the same call this repo already makes on a Linear patch op list.
+
+Consequence: `TICKETVOICE_MAX_SUMMARY_WORDS` is a second override, deliberately not riding on
+`TICKETVOICE_MAX_WORDS` — giving a body room should not silently buy a 40-word title. The summary is
+not forwarded to the siblings, matching Linear, whose title never is: cope scores paragraph
+structure, which a one-line title standing in for a paragraph would skew. A create carrying only a
+summary therefore reaches neither sibling and spawns no subprocess. The agent tag goes on the body
+and never the summary, and on an edit that means `fields.description`, nested — a full description
+replacement is a fresh post into a field, not a patch.
+
 ## Deny instead of ask on a flagged or over-budget write — 2026-08-29
 
 `permissionDecisionReason` for `"ask"` is shown to the user, not Claude — confirmed against the
