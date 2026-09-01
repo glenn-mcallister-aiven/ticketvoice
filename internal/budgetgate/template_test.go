@@ -1,10 +1,12 @@
 package budgetgate
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // TestMain clears the budget and template variables for the whole package. These are meant to be
@@ -78,7 +80,7 @@ func TestCommentClassNeverGetsIssueAdvice(t *testing.T) {
 		"", // no vendor: still resolves through default.comment
 	} {
 		for _, kind := range []string{"comment", "worklog comment", "diff review", "pr comment"} {
-			advice, _ := Advice(tool, kind)
+			advice, _ := Advice(tool, "", kind)
 			if advice != "" {
 				t.Fatalf("Advice(%q, %q) = %q, want none", tool, kind, advice)
 			}
@@ -87,7 +89,7 @@ func TestCommentClassNeverGetsIssueAdvice(t *testing.T) {
 }
 
 func TestIssueClassCarriesTheBuiltinTemplate(t *testing.T) {
-	advice, note := Advice("mcp__atlassian__createJiraIssue", "issue description")
+	advice, note := Advice("mcp__atlassian__createJiraIssue", "", "issue description")
 	if !strings.Contains(advice, "Four slots") {
 		t.Fatalf("an issue denial must carry the built-in template, got %q", advice)
 	}
@@ -97,7 +99,7 @@ func TestIssueClassCarriesTheBuiltinTemplate(t *testing.T) {
 }
 
 func TestSummaryClassCarriesNoAdvice(t *testing.T) {
-	if advice, _ := Advice("mcp__atlassian__createJiraIssue", "summary"); advice != "" {
+	if advice, _ := Advice("mcp__atlassian__createJiraIssue", "", "summary"); advice != "" {
 		t.Fatalf("a summary carries its own one-line reason, not advice: %q", advice)
 	}
 }
@@ -108,13 +110,13 @@ func TestOperatorFileOverridesOneKeyOnly(t *testing.T) {
 	t.Setenv("TICKETVOICE_TEMPLATE_FILE", writeTemplateFile(t, `[jira.comment]
 One finding per comment. Lead with what changed.
 `))
-	if advice, _ := Advice("mcp__atlassian__addCommentToJiraIssue", "comment"); advice != "One finding per comment. Lead with what changed." {
+	if advice, _ := Advice("mcp__atlassian__addCommentToJiraIssue", "", "comment"); advice != "One finding per comment. Lead with what changed." {
 		t.Fatalf("the file's jira.comment must win, got %q", advice)
 	}
-	if advice, _ := Advice("mcp__atlassian__createJiraIssue", "issue description"); !strings.Contains(advice, "Four slots") {
+	if advice, _ := Advice("mcp__atlassian__createJiraIssue", "", "issue description"); !strings.Contains(advice, "Four slots") {
 		t.Fatalf("jira.issue was not overridden, so the built-in stands, got %q", advice)
 	}
-	if advice, _ := Advice("mcp__linear__save_comment", "comment"); advice != "" {
+	if advice, _ := Advice("mcp__linear__save_comment", "", "comment"); advice != "" {
 		t.Fatalf("a jira key must not apply to linear, got %q", advice)
 	}
 }
@@ -123,7 +125,7 @@ One finding per comment. Lead with what changed.
 // omitting it and inheriting the built-in.
 func TestEmptySectionSuppressesTheBuiltin(t *testing.T) {
 	t.Setenv("TICKETVOICE_TEMPLATE_FILE", writeTemplateFile(t, "[jira.issue]\n"))
-	if advice, _ := Advice("mcp__atlassian__createJiraIssue", "issue description"); advice != "" {
+	if advice, _ := Advice("mcp__atlassian__createJiraIssue", "", "issue description"); advice != "" {
 		t.Fatalf("an empty jira.issue section must suppress the built-in, got %q", advice)
 	}
 }
@@ -134,13 +136,13 @@ func TestTicketvoiceTemplateSelectsByName(t *testing.T) {
 State what moved, what is blocked, and what you need.
 `))
 	t.Setenv("TICKETVOICE_TEMPLATE", "progress-update")
-	advice, _ := Advice("mcp__atlassian__createJiraIssue", "issue description")
+	advice, _ := Advice("mcp__atlassian__createJiraIssue", "", "issue description")
 	if advice != "State what moved, what is blocked, and what you need." {
 		t.Fatalf("the named template must beat vendor.class, got %q", advice)
 	}
 	// A name with no section falls back rather than silently emptying the advice.
 	t.Setenv("TICKETVOICE_TEMPLATE", "no-such-template")
-	if advice, _ := Advice("mcp__atlassian__createJiraIssue", "issue description"); !strings.Contains(advice, "Four slots") {
+	if advice, _ := Advice("mcp__atlassian__createJiraIssue", "", "issue description"); !strings.Contains(advice, "Four slots") {
 		t.Fatalf("an unknown name must fall through to vendor.class, got %q", advice)
 	}
 }
@@ -151,7 +153,7 @@ State what moved, what is blocked, and what you need.
 func TestOversizedTemplateFileLoadsNothingAndSaysSo(t *testing.T) {
 	t.Setenv("TICKETVOICE_TEMPLATE_FILE", writeTemplateFile(t,
 		"[jira.issue]\n"+strings.Repeat("x ", maxTemplateFile)))
-	advice, note := Advice("mcp__atlassian__createJiraIssue", "issue description")
+	advice, note := Advice("mcp__atlassian__createJiraIssue", "", "issue description")
 	if !strings.Contains(advice, "Four slots") {
 		t.Fatalf("an unusable file leaves the built-in table standing, got %q", advice)
 	}
@@ -162,7 +164,7 @@ func TestOversizedTemplateFileLoadsNothingAndSaysSo(t *testing.T) {
 
 func TestMissingTemplateFileIsReportedNotFatal(t *testing.T) {
 	t.Setenv("TICKETVOICE_TEMPLATE_FILE", filepath.Join(t.TempDir(), "does-not-exist"))
-	advice, note := Advice("mcp__atlassian__createJiraIssue", "issue description")
+	advice, note := Advice("mcp__atlassian__createJiraIssue", "", "issue description")
 	if !strings.Contains(advice, "Four slots") || note == "" {
 		t.Fatalf("want the built-in plus a note, got advice=%q note=%q", advice, note)
 	}
@@ -208,5 +210,126 @@ func TestHeaderNagIsIssueClassOnly(t *testing.T) {
 	_, commentReason := Evaluate(body, "comment", 100)
 	if strings.Contains(commentReason, "section header") {
 		t.Fatalf("a comment must not be told to drop its sections: %q", commentReason)
+	}
+}
+
+// Jira states the issue type in the call, so an Epic and a Bug can be told different things without
+// anything inferring genre. Measured on 2026-09-01: an Epic holding a project map was denied and
+// instructed to fill four defect-report slots.
+func TestSubtypeBeatsClassButFallsBack(t *testing.T) {
+	t.Setenv("TICKETVOICE_TEMPLATE_FILE", writeTemplateFile(t, `[jira.epic.issue]
+Name the destination, what is settled, and what is not. No mechanism recap.
+`))
+	epic, _ := Advice("mcp__atlassian__createJiraIssue", "Epic", "issue description")
+	if epic != "Name the destination, what is settled, and what is not. No mechanism recap." {
+		t.Fatalf("jira.epic.issue must win for an Epic, got %q", epic)
+	}
+	// Case-insensitive, since the caller writes the type as Jira displays it.
+	if lower, _ := Advice("mcp__atlassian__createJiraIssue", "epic", "issue description"); lower != epic {
+		t.Fatalf("subtype matching must not be case-sensitive, got %q", lower)
+	}
+	// A type with no section of its own falls back to the class, not to nothing.
+	if bug, _ := Advice("mcp__atlassian__createJiraIssue", "Bug", "issue description"); !strings.Contains(bug, "Four slots") {
+		t.Fatalf("an unkeyed type falls back to jira.issue, got %q", bug)
+	}
+	// A subtype must not resurrect issue advice for a comment.
+	if c, _ := Advice("mcp__atlassian__addCommentToJiraIssue", "Epic", "comment"); c != "" {
+		t.Fatalf("a comment stays advice-free whatever the subtype, got %q", c)
+	}
+}
+
+func TestTrimNoteDropsLineTailsThenBoundsTheWhole(t *testing.T) {
+	long := "[flip] " + strings.Repeat("rationale ", 40)
+	if got := trimNote(long); len(got) > maxSiblingLine+len("…") {
+		t.Fatalf("a long line must lose its tail, got %d bytes", len(got))
+	}
+	if got := trimNote(long); !strings.HasPrefix(got, "[flip] ") {
+		t.Fatalf("the leading identifier is the part worth keeping, got %q", got[:20])
+	}
+
+	// Distinct findings, enough of them to exceed the cap: the note is bounded and says so. They
+	// have to differ, since identical lines collapse before the cap is ever reached.
+	var distinct strings.Builder
+	for i := 0; i < 40; i++ {
+		fmt.Fprintf(&distinct, "[rule%02d] %s\n", i, strings.Repeat("rationale ", 40))
+	}
+	got := trimNote(distinct.String())
+	if len(got) > maxSiblingNote+128 {
+		t.Fatalf("the note must be bounded, got %d bytes", len(got))
+	}
+	if !strings.Contains(got, "further findings not shown") {
+		t.Fatalf("a truncated note must be distinguishable from a short one: %q", got)
+	}
+}
+
+// Capping without deduping inverts the priority: a rule that fired nine times states its rationale
+// nine times, fills the budget, and the cap then drops the findings the writer has not already been
+// told about. Measured on 2026-09-01 against a real Epic — paragraph_uniformity and short_close were
+// the two that went.
+func TestTrimNoteCollapsesRepeatsSoDistinctFindingsSurvive(t *testing.T) {
+	rule := "  [flip] " + strings.Repeat("rationale ", 40)
+	note := "description: 11 violation(s)\n" +
+		strings.Repeat(rule+"\n", 9) +
+		"  [paragraph_uniformity] lengths too even\n" +
+		"  [short_close] the close is one or two sentences\n"
+
+	got := trimNote(note)
+	for _, want := range []string{"paragraph_uniformity", "short_close"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("%s must survive nine repeats of another rule:\n%s", want, got)
+		}
+	}
+	if n := strings.Count(got, "[flip]"); n != 1 {
+		t.Fatalf("the repeated rule must appear once, got %d times", n)
+	}
+	if !strings.Contains(got, "×9") {
+		t.Fatalf("the collapsed line must carry its count: %q", got)
+	}
+	if strings.Contains(got, "further findings not shown") {
+		t.Fatalf("deduping should have brought this under the cap without truncating:\n%s", got)
+	}
+}
+
+// A byte-offset slice through an em-dash produces mojibake in the text Claude is asked to act on.
+func TestTrimNoteNeverSplitsARune(t *testing.T) {
+	for _, s := range []string{
+		strings.Repeat("—", 400),
+		strings.Repeat("a—b ", 200),
+		"[flip] " + strings.Repeat("…verdict— ", 60),
+	} {
+		got := trimNote(s)
+		if !utf8.ValidString(got) {
+			t.Fatalf("trimNote produced invalid UTF-8 from %d bytes of input", len(s))
+		}
+	}
+}
+
+// Both siblings read the synthetic Linear payload and echo it back. Naming the real tool in the
+// payload is not an option — cope returns no verdict for a tool name it does not know — so the note
+// is corrected afterwards.
+func TestRelabelCorrectsTheDestination(t *testing.T) {
+	copeNote := "cope scored the prose this mcp__linear__save_issue call is about to post, in the external lane"
+	got := Relabel(copeNote, "mcp__atlassian__createJiraIssue", "issue description")
+	if strings.Contains(got, "mcp__linear__save_issue") {
+		t.Fatalf("the synthetic tool name must not survive: %q", got)
+	}
+	if !strings.Contains(got, "mcp__atlassian__createJiraIssue") {
+		t.Fatalf("the real tool name must appear: %q", got)
+	}
+
+	basNote := "basanite — words you lean on, in the text about to be written to Linear (awareness, not prohibition)"
+	if got := Relabel(basNote, "mcp__atlassian__addCommentToJiraIssue", "comment"); !strings.Contains(got, "written to Jira") {
+		t.Fatalf("basanite's hardcoded label must be corrected: %q", got)
+	}
+	if got := Relabel(basNote, "github", "issue comment"); !strings.Contains(got, "written to GitHub") {
+		t.Fatalf("gh-write bridges the same way: %q", got)
+	}
+
+	// A real Linear write is already accurate and must be left exactly as it came.
+	if got := Relabel(copeNote, "mcp__linear__save_issue", "issue description"); got != copeNote {
+		t.Fatalf("a Linear note must pass through untouched: %q", got)
+	}
+	if got := Relabel("", "mcp__atlassian__createJiraIssue", "comment"); got != "" {
+		t.Fatalf("an empty note stays empty, got %q", got)
 	}
 }

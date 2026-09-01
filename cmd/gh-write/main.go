@@ -77,9 +77,13 @@ func gateBody(object, verb, text string) (blocked bool, reason string) {
 	budget = budgetgate.BudgetForKind(kind, budget)
 	over, budgetReason := budgetgate.Evaluate(text, kind, budget)
 
+	// The bridge into the siblings keeps the Linear shape (cope scores nothing for a tool name it
+	// does not know), so both notes name Linear and both have to be corrected on the way out.
 	payload := budgetgate.LinearPayload(kind, text)
 	cope := budgetgate.JudgeCope(payload)
 	basanite := budgetgate.JudgeBasanite(payload)
+	cope.Note = budgetgate.Relabel(cope.Note, "github", kind)
+	basanite.Note = budgetgate.Relabel(basanite.Note, "github", kind)
 	if !over && !cope.Flagged && !basanite.Flagged {
 		return false, ""
 	}
@@ -97,7 +101,7 @@ func gateBody(object, verb, text string) (blocked bool, reason string) {
 	}
 	// Shape advice, where a template covers this vendor and kind. A GitHub issue or PR description
 	// gets the four-slot template; a comment gets the count and nothing else — see template.go.
-	if advice, note := budgetgate.Advice("github", kind); advice != "" || note != "" {
+	if advice, note := budgetgate.Advice("github", "", kind); advice != "" || note != "" {
 		for _, extra := range []string{advice, note} {
 			if extra != "" {
 				reason += "\n\n" + extra

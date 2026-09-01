@@ -222,8 +222,13 @@ One finding per comment. Lead with what changed since the last one.
 State what moved, what is blocked, and what you need. No mechanism recap.
 ```
 
-Keys are `<tracker>.<class>` — `jira`, `linear` or `github`, by `issue`, `comment` or `summary` —
-resolving to `default.<class>` when absent. Every key carries a class deliberately: a bare `[jira]`
+Keys are `<tracker>.<subtype>.<class>` or `<tracker>.<class>` — `jira`, `linear` or `github`, by
+`issue`, `comment` or `summary` — resolving to `default.<class>` when absent. The subtype is the
+tracker's own name for what is being written, where the call states one: Jira's `issueTypeName`, so
+`[jira.epic.issue]` can say what a project map should look like while `[jira.issue]` still covers a
+bug report. Nothing is inferred there — the type is a field the caller filled in. An Epic holding a
+project map was denied on 2026-09-01 and told to fill four defect slots, which a class-only key
+cannot tell apart. Every key carries a class deliberately: a bare `[jira]`
 catch-all would hand the issue template to a Jira comment, which is the failure above. A section
 declared with no body suppresses the built-in, which is how you ask for the count alone.
 
@@ -271,6 +276,19 @@ verdict into a gate: it forwards its own stdin to `cope-gate -pretool` and
 budget — so a within-budget ticket carrying a flagged tic gets sent back to Claude the same as an
 over-length one. See [CHANGELOG.md](CHANGELOG.md) for how basanite's dedup state made this need a
 new flag on its side.
+
+What each sibling contributes to a denial is bounded: long lines lose their tails, identical lines
+collapse to one carrying a count, and the whole note is capped at 1 KiB with a marker. All three
+passes exist because the reason reaches Claude's context on every denial. A 936-word Epic drew a
+4,342-byte reason of which 4,256 were cope's, since cope restates a rule's rationale once per
+violation and that Epic tripped one rule nine times — and capping without the dedup pass kept the
+nine copies and dropped the two findings that had only fired once.
+
+Both siblings also name Linear in a note about a Jira or GitHub write, because the bridge hands them
+a Linear-shaped payload: cope echoes the tool it was given, basanite derives the label from the
+absent `file_path`. Naming the real tool in the payload is not an option — `cope-gate -pretool`
+returns no verdict at all for a tool name it does not know — so the note is corrected on the way out
+instead.
 
 Neither sibling's matcher reaches Jira either, and adding it wouldn't help: basanite reads a flat
 `file_path`/`content`/`new_string`/`body`/`description` input, which has no case for `commentBody`

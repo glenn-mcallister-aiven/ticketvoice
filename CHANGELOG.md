@@ -1,5 +1,37 @@
 # Changelog
 
+## Bound the sibling notes, key advice on issue type, stop naming Linear — 2026-09-01
+
+Three findings from the first live denial, a 936-word Jira Epic.
+
+The reason was 4,342 bytes and 4,256 of them were cope's note, because cope restates a rule's
+rationale once per violation and that Epic tripped one rule nine times. Every byte reaches Claude's
+context on every denial, which is the argument that already capped the operator template file, and a
+sibling note is the part that scales with the writing rather than being fixed. Notes are now bounded
+in three passes: each line loses its tail, keeping the identifier a finding leads with; identical
+lines collapse to one carrying a count; then the whole note is capped at 1 KiB with a marker. The
+order decides which findings survive — capping alone kept nine copies of one rationale and dropped
+`paragraph_uniformity` and `short_close`, the two rules that had fired once each. 4,342 bytes became
+1,381 with nothing truncated.
+
+Shape advice now resolves through `<tracker>.<subtype>.<class>` before `<tracker>.<class>`. That Epic
+was a project map and was told to fill four defect-report slots, which a class-only key cannot tell
+from a bug. `createJiraIssue` states `issueTypeName`, so `[jira.epic.issue]` is available without
+anything inferring genre — the type is a field the caller filled in. Only a create carries it; an
+edit would need the issue fetched, which this hook will not do.
+
+Both siblings named Linear in a note about a Jira write. cope echoes the tool name it was handed and
+basanite derives its label from the absent `file_path`, both reading the synthetic payload the bridge
+builds. Naming the real tool in that payload is not available: measured the same day,
+`cope-gate -pretool` returns no verdict at all for a tool name it does not know, an Atlassian one
+included, so the bridge is what buys a verdict and correcting the note afterwards is what makes it
+honest. The substitution is coupled to basanite's current wording and becomes a no-op if that
+changes, which is the right failure — a stale rule leaves the note as it came.
+
+Consequence: `budgetgate.Advice` takes a subtype, `""` where a tracker states none, and truncation is
+rune-safe. A byte-offset slice through the em-dash both notes use produces mojibake in the text
+Claude is being asked to act on.
+
 ## A budget per class, and shape advice that stops guessing genre — 2026-09-01
 
 One `TICKETVOICE_MAX_WORDS` for every class could not express the problem it was being asked to

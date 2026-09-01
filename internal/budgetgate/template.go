@@ -128,14 +128,20 @@ func parseTemplates(s string) map[string]string {
 	return out
 }
 
-// Advice returns the shape advice for one write, and a note about a template file that was named
-// but not loaded. Resolution runs most specific to least: TICKETVOICE_TEMPLATE names a section
-// outright, then "<vendor>.<class>", then "default.<class>" — each looked up in the operator's file
-// before the built-in table, so a file can override one key without restating the rest. Every key
-// carries the class, so no lookup can end up handing issue advice to a comment.
+// Advice returns the shape advice for one write, and a note about a template file that was named but
+// not loaded. Resolution runs most specific to least: TICKETVOICE_TEMPLATE names a section outright,
+// then "<vendor>.<subtype>.<class>", then "<vendor>.<class>", then "default.<class>" — each looked up
+// in the operator's file before the built-in table, so a file can override one key without restating
+// the rest. Every key carries the class, so no lookup can end up handing issue advice to a comment.
+//
+// subtype is the tracker's own name for what is being written, where the call states one: Jira's
+// `issueTypeName`, so an Epic and a Bug can be told different things. That is not the hook guessing
+// at genre — it is a field the caller filled in. Measured on 2026-09-01, an Epic holding a project
+// map was denied and instructed to fill four defect-report slots, which is what a class-only key
+// cannot distinguish. Pass "" where the tracker states nothing.
 //
 // An empty result is an outcome, not a failure: the denial states the count and stops there.
-func Advice(tool, kind string) (advice, note string) {
+func Advice(tool, subtype, kind string) (advice, note string) {
 	ops, note := operatorAdvice()
 	keys := []string{}
 	if name := strings.ToLower(strings.TrimSpace(os.Getenv("TICKETVOICE_TEMPLATE"))); name != "" {
@@ -143,6 +149,9 @@ func Advice(tool, kind string) (advice, note string) {
 	}
 	class := KindClass(kind)
 	if vendor := Vendor(tool); vendor != "" {
+		if sub := strings.ToLower(strings.TrimSpace(subtype)); sub != "" {
+			keys = append(keys, vendor+"."+sub+"."+class)
+		}
 		keys = append(keys, vendor+"."+class)
 	}
 	keys = append(keys, "default."+class)

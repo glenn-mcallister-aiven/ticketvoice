@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // AgentTag marks a body as agent-authored even though it's posted under the operator's own
@@ -162,6 +163,102 @@ func EvaluateSummary(text string, budget int) (over bool, reason string) {
 		words, budget, words-budget)
 }
 
+// A sibling's note is bounded before it goes anywhere near a denial reason. Measured on 2026-09-01:
+// a 936-word Epic drew a 4,342-byte reason of which 4,256 were cope's, because cope repeats a
+// ~250-character rationale once per violation and that Epic tripped eleven. Every byte reaches
+// Claude's context on every denial — the same argument that caps the operator template file — and a
+// sibling note is the part that scales with the writing rather than being fixed.
+const (
+	maxSiblingNote = 1 << 10
+	maxSiblingLine = 160
+)
+
+// truncRunes cuts to at most max bytes without splitting a rune. Both notes carry em-dashes, and a
+// byte-offset slice through one produces mojibake in the text Claude is being asked to act on.
+func truncRunes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
+	}
+	return s[:max]
+}
+
+// trimNote bounds a note in three passes, in this order because the order is what decides which
+// findings survive.
+//
+// Each line loses its tail first, which keeps the identifier a finding leads with — cope's "[flip]",
+// basanite's flagged word — and sheds the explanation behind it. Then identical lines collapse to
+// one with a count: a rule that fired nine times stated its rationale nine times, and the header
+// already says "flip×9", so the repetition is pure duplication. Only then is the whole note bounded.
+//
+// Capping without the dedup pass inverts the priority. Measured on 2026-09-01: nine identical flip
+// rationales filled the budget and the cap then dropped paragraph_uniformity and short_close, which
+// were the two findings the writer had not already been told about eight times.
+func trimNote(s string) string {
+	var out []string
+	at := map[string]int{} // line -> its index in out
+	extra := map[int]int{} // index in out -> how many repeats were dropped
+	for _, l := range strings.Split(s, "\n") {
+		if len(l) > maxSiblingLine {
+			l = strings.TrimRight(truncRunes(l, maxSiblingLine), " ") + "…"
+		}
+		// Blank lines are structure, not content, so they are never collapsed together.
+		if strings.TrimSpace(l) == "" {
+			out = append(out, l)
+			continue
+		}
+		if i, ok := at[l]; ok {
+			extra[i]++
+			continue
+		}
+		at[l] = len(out)
+		out = append(out, l)
+	}
+	for i, n := range extra {
+		out[i] = fmt.Sprintf("%s ×%d", out[i], n+1)
+	}
+	joined := strings.Join(out, "\n")
+	if len(joined) <= maxSiblingNote {
+		return joined
+	}
+	return strings.TrimRight(truncRunes(joined, maxSiblingNote), " \n") + "\n…note truncated; further findings not shown."
+}
+
+// syntheticTool is the tool_name LinearPayload writes into a bridged payload. It lives next to
+// Relabel so the two cannot drift from LinearPayload's own branch.
+func syntheticTool(kind string) string {
+	if strings.HasSuffix(kind, "comment") {
+		return "mcp__linear__save_comment"
+	}
+	return "mcp__linear__save_issue"
+}
+
+var vendorNames = map[string]string{"jira": "Jira", "linear": "Linear", "github": "GitHub"}
+
+// Relabel corrects the destination a sibling names in its note. Both read the synthetic Linear
+// payload the bridge hands them and echo it back: cope names the tool it was given, basanite says
+// the text is "about to be written to Linear" from a label it derives from the absence of a
+// file_path. Neither is true of a Jira or GitHub write, and Claude reads the note.
+//
+// Naming the real tool in the payload instead is not available. Measured on 2026-09-01,
+// cope-gate -pretool returns no verdict at all for a tool name it does not know — an Atlassian one
+// included — so the bridge is what buys a verdict, and correcting the note afterwards is what makes
+// it honest. The bare-word substitution is coupled to basanite's current label and degrades to a
+// no-op if that wording changes, which is the right failure: a stale rule leaves the note as it was.
+func Relabel(note, tool, kind string) string {
+	vendor := Vendor(tool)
+	if note == "" || vendor == "linear" || vendor == "" {
+		return note
+	}
+	out := strings.ReplaceAll(note, syntheticTool(kind), tool)
+	if name := vendorNames[vendor]; name != "" {
+		out = strings.ReplaceAll(out, "Linear", name)
+	}
+	return out
+}
+
 // Judgment is what a sibling scorer found. Flagged false and Note "" both mean "nothing to add" —
 // the same shape whether the sibling is clean or unreachable, since the two must not be told apart.
 type Judgment struct {
@@ -207,7 +304,7 @@ func judgeSibling(bin string, args []string, rawStdin []byte) Judgment {
 		return Judgment{}
 	}
 	note := strings.TrimSpace(resp.HookSpecificOutput.AdditionalContext)
-	return Judgment{Flagged: note != "", Note: note}
+	return Judgment{Flagged: note != "", Note: trimNote(note)}
 }
 
 // JudgeCope calls cope-gate -pretool. It writes no session state (pretool.go: "Per-write feedback

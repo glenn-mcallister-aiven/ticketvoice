@@ -97,10 +97,15 @@ type linearInput struct {
 // on the same call are still read. Walking an ADF tree for its text leaves is left undone, the
 // same call the repo already makes on a Linear patch op list.
 type jiraInput struct {
-	Summary     json.RawMessage            `json:"summary"`
-	Description json.RawMessage            `json:"description"`
-	CommentBody json.RawMessage            `json:"commentBody"`
-	Fields      map[string]json.RawMessage `json:"fields"`
+	// IssueTypeName is the caller's own statement of what it is filing — Epic, Bug, Task. It keys
+	// shape advice (budgetgate.Advice) so a project map is not told to become a defect report, and
+	// it is the one genre signal in the payload that is stated rather than inferred. Only a create
+	// carries it; an edit would need the issue fetched, which a PreToolUse hook will not do.
+	IssueTypeName string                     `json:"issueTypeName"`
+	Summary       json.RawMessage            `json:"summary"`
+	Description   json.RawMessage            `json:"description"`
+	CommentBody   json.RawMessage            `json:"commentBody"`
+	Fields        map[string]json.RawMessage `json:"fields"`
 }
 
 type bashInput struct {
@@ -111,9 +116,13 @@ type bashInput struct {
 // independent ones — a title under its own budget and a body under another — which is why
 // extraction returns a slice rather than the one field a Linear write ever has.
 type proseField struct {
-	Text   string
-	Kind   string
-	Budget int
+	Text string
+	Kind string
+	// Subtype is the tracker's name for what is being written, where the call states one. It is the
+	// same value on every field of a call — a create's title and body are both part of one Epic —
+	// carried per field so the advice lookup has it where the budget verdict already is.
+	Subtype string
+	Budget  int
 }
 
 type hookOutput struct {
@@ -182,7 +191,7 @@ func jiraProse(tool string, in jiraInput) []proseField {
 	var out []proseField
 	add := func(text, kind string, budget int) {
 		if text != "" {
-			out = append(out, proseField{Text: text, Kind: kind, Budget: budget})
+			out = append(out, proseField{Text: text, Kind: kind, Subtype: in.IssueTypeName, Budget: budget})
 		}
 	}
 	switch tool {
@@ -376,16 +385,16 @@ func bodyField(fields []proseField) proseField { return fields[len(fields)-1] }
 // paragraph would skew. Its 20-word budget is the control on it. A call carrying only a summary
 // therefore has nothing to forward and returns nil, which skips both subprocesses rather than
 // handing them an empty payload to guess at.
-func siblingStdin(tool string, raw []byte, fields []proseField) []byte {
+func siblingStdin(tool string, raw []byte, fields []proseField) (stdin []byte, bridgedKind string) {
 	if !strings.HasPrefix(tool, "mcp__atlassian__") {
-		return raw
+		return raw, ""
 	}
 	for _, f := range fields {
 		if f.Kind != "summary" {
-			return budgetgate.LinearPayload(f.Kind, f.Text)
+			return budgetgate.LinearPayload(f.Kind, f.Text), f.Kind
 		}
 	}
-	return nil
+	return nil, ""
 }
 
 // tagPath names the tool_input field taggedInput should rewrite, as a path from the input object's
@@ -522,15 +531,22 @@ func runHookWithInput(raw []byte) *hookOutput {
 		}
 		overReasons = append(overReasons, reason)
 		if advice == "" {
-			advice, adviceNote = budgetgate.Advice(in.ToolName, f.Kind)
+			advice, adviceNote = budgetgate.Advice(in.ToolName, f.Subtype, f.Kind)
 		}
 	}
 	over := len(overReasons) > 0
 
 	var cope, basanite budgetgate.Judgment
-	if sib := siblingStdin(in.ToolName, raw, fields); sib != nil {
+	if sib, bridged := siblingStdin(in.ToolName, raw, fields); sib != nil {
 		cope = judgeCope(sib)
 		basanite = judgeBasanite(sib)
+		// A bridged payload makes both siblings name Linear — the tool cope was handed, the label
+		// basanite derives from a missing file_path. Correcting it here is the only place that can:
+		// the payload has to keep the Linear shape or cope returns no verdict at all.
+		if bridged != "" {
+			cope.Note = budgetgate.Relabel(cope.Note, in.ToolName, bridged)
+			basanite.Note = budgetgate.Relabel(basanite.Note, in.ToolName, bridged)
+		}
 	}
 
 	// Only one kind per call maps to a taggable field (tagPath returns nil for a summary), so the
@@ -635,7 +651,7 @@ func runCheck(args []string) int {
 		fmt.Printf("%s: %d words against a %d-word %s budget — within budget.\n", path, proseWords(string(data)), budget, kind)
 		return 0
 	}
-	if advice, _ := budgetgate.Advice("", kind); advice != "" {
+	if advice, _ := budgetgate.Advice("", "", kind); advice != "" {
 		reason += "\n\n" + advice
 	}
 	fmt.Println(reason + "\n\nCut it and check again.")
