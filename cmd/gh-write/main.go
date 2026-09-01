@@ -74,7 +74,7 @@ func validate(args []string) (ghArgs []string, usageErr string) {
 // heredoc, a `< file` redirect, or a pipe. Empty reason means clean.
 func gateBody(object, verb, text string) (blocked bool, reason string) {
 	kind, budget := budgetgate.Classify(object, verb)
-	budget = budgetgate.BudgetFor(budget)
+	budget = budgetgate.BudgetForKind(kind, budget)
 	over, budgetReason := budgetgate.Evaluate(text, kind, budget)
 
 	payload := budgetgate.LinearPayload(kind, text)
@@ -94,6 +94,15 @@ func gateBody(object, verb, text string) (blocked bool, reason string) {
 	}
 	if basanite.Flagged {
 		reason += fmt.Sprintf("\n\nbasanite flagged this:\n\n%s", basanite.Note)
+	}
+	// Shape advice, where a template covers this vendor and kind. A GitHub issue or PR description
+	// gets the four-slot template; a comment gets the count and nothing else — see template.go.
+	if advice, note := budgetgate.Advice("github", kind); advice != "" || note != "" {
+		for _, extra := range []string{advice, note} {
+			if extra != "" {
+				reason += "\n\n" + extra
+			}
+		}
 	}
 	reason += "\n\nCut it and call gh-write again with less."
 	return true, reason

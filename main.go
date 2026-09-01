@@ -1,5 +1,5 @@
-// ticketvoice is a Claude Code PreToolUse hook that gates Linear ticket prose through cope,
-// basanite, and a word budget before it posts.
+// ticketvoice is a Claude Code PreToolUse hook that gates ticket prose — Linear, Jira and GitHub —
+// through cope, basanite, and a word budget before it posts.
 //
 // A memory saying "write like a pragmatic staff engineer" held, and tickets still ran long anyway —
 // a memory is a taste, and a taste can be talked past mid-generation without ever registering as a
@@ -8,13 +8,18 @@
 //
 // Silent when the body clears all three. Otherwise it returns permissionDecision "deny" — the reason
 // goes to Claude, not a human, so Claude retries on its own instead of paging anyone.
-// TICKETVOICE_MAX_WORDS is the only override, set ahead of time, not decided per ticket.
+// Every budget is overridable ahead of time, never decided per ticket: TICKETVOICE_MAX_ISSUE_WORDS,
+// TICKETVOICE_MAX_COMMENT_WORDS and TICKETVOICE_MAX_SUMMARY_WORDS per class, TICKETVOICE_MAX_WORDS
+// as the shared fallback. A denial states the count and the cap; shape advice is separate and comes
+// from a template keyed on tracker and class, since the hook cannot know a body's genre — see
+// internal/budgetgate/template.go.
 //
 // Two sibling tools watch the same Linear writes — basanite (vocabulary tics) and cope (voicing and
 // structure) — and both, independently, chose never to block on their own: additionalContext only.
-// This hook closes that by calling both directly, forwarding the exact bytes it received to
-// cope-gate -pretool and basanite writecheck -no-dedup and gating on their verdicts too, not just
-// the budget — see judgeCope and judgeBasanite. See CHANGELOG.md.
+// This hook closes that by calling both directly, forwarding to cope-gate -pretool and
+// basanite writecheck -no-dedup and gating on their verdicts too, not just the budget — see
+// judgeCope and judgeBasanite. A Linear or Bash call is forwarded verbatim; a Jira call is in no
+// shape either sibling can read, so siblingStdin bridges it. See CHANGELOG.md.
 package main
 
 import (
@@ -338,7 +343,6 @@ const (
 )
 
 func proseWords(s string) int { return budgetgate.ProseWords(s) }
-func budgetFor(base int) int  { return budgetgate.BudgetFor(base) }
 func evaluate(text, kind string, budget int) (bool, string) {
 	return budgetgate.Evaluate(text, kind, budget)
 }
@@ -349,10 +353,11 @@ func judgeBasanite(rawStdin []byte) budgetgate.Judgment { return budgetgate.Judg
 // kind: a summary carries its own override, deliberately not riding on TICKETVOICE_MAX_WORDS, and
 // its denial reason is its own too — see budgetgate.EvaluateSummary.
 func evaluateField(f proseField) (bool, string) {
+	budget := budgetgate.BudgetForKind(f.Kind, f.Budget)
 	if f.Kind == "summary" {
-		return budgetgate.EvaluateSummary(f.Text, budgetgate.SummaryBudgetFor())
+		return budgetgate.EvaluateSummary(f.Text, budget)
 	}
-	return evaluate(f.Text, f.Kind, budgetFor(f.Budget))
+	return evaluate(f.Text, f.Kind, budget)
 }
 
 // bodyField is the field a message about the call as a whole should name. Extraction appends title
@@ -504,10 +509,20 @@ func runHookWithInput(raw []byte) *hookOutput {
 	// Every field is checked before anything is reported, so a Jira create over on both its title
 	// and its body is denied once carrying both counts. Reporting the first and stopping would make
 	// Claude find the second on the retry, at the cost of a whole extra round trip.
+	// Shape advice comes from the field that is actually over, not from the call: a create whose
+	// title is too long and whose body is fine has nothing to say about body structure. Advice for
+	// the comment and summary classes is empty by design (template.go), so a denied comment carries
+	// the count and stops there.
 	var overReasons []string
+	var advice, adviceNote string
 	for _, f := range fields {
-		if over, reason := evaluateField(f); over {
-			overReasons = append(overReasons, reason)
+		over, reason := evaluateField(f)
+		if !over {
+			continue
+		}
+		overReasons = append(overReasons, reason)
+		if advice == "" {
+			advice, adviceNote = budgetgate.Advice(in.ToolName, f.Kind)
 		}
 	}
 	over := len(overReasons) > 0
@@ -543,14 +558,22 @@ func runHookWithInput(raw []byte) *hookOutput {
 	if over {
 		reason = strings.Join(overReasons, "\n\n")
 	} else {
+		// The number quoted here has to be the one actually in force for this class, or a
+		// within-budget denial names a cap the write was never measured against.
 		bf := bodyField(fields)
-		reason = fmt.Sprintf("This %s is inside the %d-word budget, but a sibling scorer flagged it on the way out.", bf.Kind, budgetFor(bf.Budget))
+		reason = fmt.Sprintf("This %s is inside the %d-word budget, but a sibling scorer flagged it on the way out.",
+			bf.Kind, budgetgate.BudgetForKind(bf.Kind, bf.Budget))
 	}
 	if cope.Flagged {
 		reason += fmt.Sprintf("\n\ncope flagged this:\n\n%s", cope.Note)
 	}
 	if basanite.Flagged {
 		reason += fmt.Sprintf("\n\nbasanite flagged this:\n\n%s", basanite.Note)
+	}
+	for _, extra := range []string{advice, adviceNote} {
+		if extra != "" {
+			reason += "\n\n" + extra
+		}
 	}
 	reason += "\n\nCut it and call again."
 
@@ -592,7 +615,7 @@ func runCheck(args []string) int {
 	if *field == "comment" {
 		kind, budget = "comment", defaultCommentBudget
 	}
-	budget = budgetFor(budget)
+	budget = budgetgate.BudgetForKind(kind, budget)
 
 	path := fs.Arg(0)
 	var data []byte
@@ -611,6 +634,9 @@ func runCheck(args []string) int {
 	if !over {
 		fmt.Printf("%s: %d words against a %d-word %s budget — within budget.\n", path, proseWords(string(data)), budget, kind)
 		return 0
+	}
+	if advice, _ := budgetgate.Advice("", kind); advice != "" {
+		reason += "\n\n" + advice
 	}
 	fmt.Println(reason + "\n\nCut it and check again.")
 	return 1

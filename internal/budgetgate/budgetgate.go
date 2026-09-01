@@ -85,13 +85,6 @@ func Classify(object, verb string) (kind string, budget int) {
 	return "issue description", IssueBudget
 }
 
-const slots = `Four slots, in this order:
-  1. The mechanism, one paragraph — what is broken, and why nothing catches it.
-  2. Evidence it is real — a SHA, a log line, a failing assertion. One sentence.
-  3. What is still exposed — file:line, not a description of the file.
-  4. The fix, as a code block, plus one line on how to prove it can go red.
-SHAs and file:line carry the detail; do not narrate what the reader can open.`
-
 // envWords reads a positive word count from an environment variable, falling back to base. A
 // value that is absent, unparseable, or non-positive leaves the compiled budget in place.
 func envWords(envVar string, base int) int {
@@ -115,6 +108,24 @@ func SummaryBudgetFor() int {
 	return envWords("TICKETVOICE_MAX_SUMMARY_WORDS", SummaryBudget)
 }
 
+// BudgetForKind resolves the budget for one write, most specific override first: the class's own
+// variable, then TICKETVOICE_MAX_WORDS, then the compiled default.
+//
+// One knob for every class cannot express the shape of the problem. Measured across 291 issues and
+// 278 comments on one operator's tracker, the two fields drifted by different multiples once agents
+// began filing: description medians went 129 to 508 words, comment medians 44 to 302. A single
+// TICKETVOICE_MAX_WORDS raised far enough to stop denying descriptions retires the comment check
+// entirely, so each class carries its own variable and the shared one stays the fallback it was.
+func BudgetForKind(kind string, base int) int {
+	switch KindClass(kind) {
+	case "summary":
+		return SummaryBudgetFor()
+	case "comment":
+		return envWords("TICKETVOICE_MAX_COMMENT_WORDS", envWords("TICKETVOICE_MAX_WORDS", base))
+	}
+	return envWords("TICKETVOICE_MAX_ISSUE_WORDS", envWords("TICKETVOICE_MAX_WORDS", base))
+}
+
 // Evaluate is the one check every caller runs through: same budget math, same reason text. over
 // is false and reason is empty when the text is within budget. The reason carries the diagnostic
 // only — what to do about it differs by caller (a hook can deny and let Claude retry; a CLI can
@@ -124,11 +135,16 @@ func Evaluate(text, kind string, budget int) (over bool, reason string) {
 	if words <= budget {
 		return false, ""
 	}
-	reason = fmt.Sprintf("This %s is %d words of prose against a %d-word budget — %d over.\n\n%s",
-		kind, words, budget, words-budget, slots)
-	if h := HeaderCount(text); h > 0 && words < headerFloor {
-		reason += fmt.Sprintf("\n\nIt also carries %d section header(s) under %d words, which cost two lines each and imply more document than there is.",
-			h, headerFloor)
+	reason = fmt.Sprintf("This %s is %d words of prose against a %d-word budget — %d over.",
+		kind, words, budget, words-budget)
+	// The header nag is shape advice, so it is scoped the way the templates are (template.go):
+	// telling a 160-word comment to carry fewer sections is the same misfire as handing it the
+	// four-slot defect template.
+	if KindClass(kind) == "issue" {
+		if h := HeaderCount(text); h > 0 && words < headerFloor {
+			reason += fmt.Sprintf("\n\nIt also carries %d section header(s) under %d words, which cost two lines each and imply more document than there is.",
+				h, headerFloor)
+		}
 	}
 	return true, reason
 }

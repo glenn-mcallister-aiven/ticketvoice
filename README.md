@@ -153,13 +153,17 @@ Either way Claude gets the same reason text and no result but "retry shorter," w
 
 ## Configuration
 
-`TICKETVOICE_MAX_WORDS` overrides the length backstop for the current call — issue or comment; it
-has no effect on cope or basanite's own verdicts. Set it in the hook's environment:
-`TICKETVOICE_MAX_WORDS=200`.
+`TICKETVOICE_MAX_ISSUE_WORDS`, `TICKETVOICE_MAX_COMMENT_WORDS` and `TICKETVOICE_MAX_SUMMARY_WORDS`
+override the length backstop per class. `TICKETVOICE_MAX_WORDS` still applies to every class as the
+fallback, and a class variable beats it. None of them touch cope or basanite's own verdicts.
 
-`TICKETVOICE_MAX_SUMMARY_WORDS` does the same for a Jira summary, separately. A title and a body are
-not the same thing to loosen: giving a ticket room for a longer body shouldn't silently buy a
-40-word title.
+One knob for every class cannot express the problem. Measured across 291 issues and 278 comments on
+one tracker, the two fields drifted by different multiples once agents began filing: description
+medians went 129 to 508 words, comment medians 44 to 302. A `TICKETVOICE_MAX_WORDS` raised far enough
+to stop denying descriptions retires the comment check entirely.
+
+`TICKETVOICE_TEMPLATE_FILE` and `TICKETVOICE_TEMPLATE` select shape advice — see
+[Shape advice](#shape-advice).
 
 `TICKETVOICE_COPE_GATE` and `TICKETVOICE_BASANITE` point at those binaries if they aren't on `PATH`.
 Missing or unreachable is not an error for either — the call just isn't scored against that sibling's
@@ -186,6 +190,44 @@ checked before anything is reported, so a call over on both is denied once with 
 than making Claude discover the second on a retry. A body sent as ADF (`contentFormat: "adf"`) is a
 JSON document object rather than a string, and isn't counted: pulling text leaves out of a node tree
 isn't worth it while the MCP's default is Markdown. The summary on the same call is still checked.
+
+## Shape advice
+
+A denial states the count and the cap. Shape advice — what the body should look like — is separate,
+and prints only where a template covers that tracker and class.
+
+It used to print unconditionally, one four-slot defect-report template on every denial whatever was
+being written. That is an assertion about genre the hook has no way to justify: a progress update, a
+triage record and a verification log are all legitimate comment bodies. Measured on 2026-08-31, a
+1,246-word progress update was denied and instructed to become a defect report.
+
+So the built-in table gives the issue class the four-slot template and gives the comment and summary
+classes nothing. An over-long comment is told it is over long, and that is all. Nothing infers
+genre; the one handle on genre is an operator's.
+
+`TICKETVOICE_TEMPLATE_FILE` points at a file of headed sections, at most 4 KiB, since whatever it
+holds reaches Claude's context on every denial:
+
+```
+[jira.comment]
+One finding per comment. Lead with what changed since the last one.
+
+[progress-update]
+State what moved, what is blocked, and what you need. No mechanism recap.
+```
+
+Keys are `<tracker>.<class>` — `jira`, `linear` or `github`, by `issue`, `comment` or `summary` —
+resolving to `default.<class>` when absent. Every key carries a class deliberately: a bare `[jira]`
+catch-all would hand the issue template to a Jira comment, which is the failure above. A section
+declared with no body suppresses the built-in, which is how you ask for the count alone.
+
+`TICKETVOICE_TEMPLATE=progress-update` names a section outright for a whole session, overriding the
+tracker and class default. That is the only lever on genre, and it is set by the operator rather than
+guessed by the hook. An unknown name falls through rather than emptying the advice.
+
+A file that is missing or over the cap leaves the built-in table standing and adds one line to the
+next denial saying so — the only abnormal path this tool does not pass over in silence, because an
+operator who set the variable expects it to work.
 
 ## Agent tag
 

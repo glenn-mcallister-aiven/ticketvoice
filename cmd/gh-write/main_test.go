@@ -12,6 +12,22 @@ import (
 	"github.com/justinstimatze/ticketvoice/internal/budgetgate"
 )
 
+// TestMain clears the budget and template variables for the whole package. These are meant to be
+// set in the hook's environment — a Claude Code `env` block reaches every tool subprocess, this
+// test binary included — so a suite that reads them ambiently asserts against whatever the machine
+// happens to be configured for. Found live: an operator's 300/160 in settings.json turned four
+// assertions about the compiled defaults red on a clean checkout.
+func TestMain(m *testing.M) {
+	for _, v := range []string{
+		"TICKETVOICE_MAX_WORDS", "TICKETVOICE_MAX_ISSUE_WORDS", "TICKETVOICE_MAX_COMMENT_WORDS",
+		"TICKETVOICE_MAX_SUMMARY_WORDS", "TICKETVOICE_TEMPLATE", "TICKETVOICE_TEMPLATE_FILE",
+		"TICKETVOICE_NO_AGENT_TAG",
+	} {
+		_ = os.Unsetenv(v)
+	}
+	os.Exit(m.Run())
+}
+
 // noSiblings points cope/basanite at a path that can't exist, so gateBody fails open and every
 // test not specifically exercising the gate isn't at the mercy of whatever's on this machine's
 // PATH.

@@ -1,5 +1,42 @@
 # Changelog
 
+## A budget per class, and shape advice that stops guessing genre — 2026-09-01
+
+One `TICKETVOICE_MAX_WORDS` for every class could not express the problem it was being asked to
+solve. Measured across 291 issues and 278 comments on one operator's Jira, the two fields drifted by
+different multiples once agents began filing: description medians ran 129 words through 2024 and
+2025 and 508 in 2026-Q3, comment medians 44 and then 302. Raising the shared variable far enough to
+stop denying descriptions retires the comment check entirely. So each class now carries its own —
+`TICKETVOICE_MAX_ISSUE_WORDS`, `TICKETVOICE_MAX_COMMENT_WORDS`, `TICKETVOICE_MAX_SUMMARY_WORDS` —
+with the shared one demoted to the fallback it always was and the compiled defaults untouched.
+
+The same measurement says the compiled defaults were never the problem. 150 sits between that
+operator's pre-agent p50 of 129 and p75 of 192, and 120 between a comment p75 of 76 and p90 of 158.
+Both are well-calibrated numbers for a human writing tickets. What changed was who was writing them,
+which is a thing to configure rather than a default to move.
+
+The denial itself no longer asserts a genre. It printed one four-slot defect-report template on every
+rejection, whatever was being written — measured on 2026-08-31, a 1,246-word progress update was
+denied and told to become a defect report. A progress update, a triage record and a verification log
+are all legitimate comment bodies, and the hook cannot tell which it is holding. So the verdict is
+now the count and the cap, which is never wrong, and shape advice comes from a table keyed
+`<tracker>.<class>` that leaves the comment and summary classes empty. Every key carries the class
+deliberately: a bare `[jira]` catch-all would hand the issue template back to a Jira comment. The
+markdown-header nag moved behind the same gate, since telling a 160-word comment to carry fewer
+sections is the same misfire in miniature.
+
+`TICKETVOICE_TEMPLATE_FILE` names a file of headed sections, capped at 4 KiB because whatever it
+holds reaches Claude's context on every denial. A missing or oversized file leaves the built-in table
+standing and adds one line to the next denial saying so — the one abnormal path this tool does not
+pass over in silence, on the grounds that an operator who set the variable expects it to work.
+`TICKETVOICE_TEMPLATE` names a section outright for a session, which is the only handle on genre
+anywhere in the tool, and it is the operator's rather than an inference.
+
+Consequence: a `--check` run and a gh-write refusal both print advice through the same resolution, so
+`make check-readme` still sees the four-slot template and a gh-write comment refusal no longer does.
+Callers that want the old combined string append `budgetgate.Advice` to `budgetgate.Evaluate`
+themselves; the two were separated so the caller decides whether a shape claim is warranted.
+
 ## Jira, as a third tracker — 2026-08-31
 
 The Atlassian MCP's four prose-carrying write tools — `createJiraIssue`, `editJiraIssue`,

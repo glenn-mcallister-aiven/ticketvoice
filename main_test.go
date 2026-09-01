@@ -10,6 +10,22 @@ import (
 
 func words(n int) string { return strings.TrimSpace(strings.Repeat("word ", n)) }
 
+// TestMain clears the budget and template variables for the whole package. These are meant to be
+// set in the hook's environment — a Claude Code `env` block reaches every tool subprocess, this
+// test binary included — so a suite that reads them ambiently asserts against whatever the machine
+// happens to be configured for. Found live: an operator's 300/160 in settings.json turned four
+// assertions about the compiled defaults red on a clean checkout.
+func TestMain(m *testing.M) {
+	for _, v := range []string{
+		"TICKETVOICE_MAX_WORDS", "TICKETVOICE_MAX_ISSUE_WORDS", "TICKETVOICE_MAX_COMMENT_WORDS",
+		"TICKETVOICE_MAX_SUMMARY_WORDS", "TICKETVOICE_TEMPLATE", "TICKETVOICE_TEMPLATE_FILE",
+		"TICKETVOICE_NO_AGENT_TAG",
+	} {
+		_ = os.Unsetenv(v)
+	}
+	os.Exit(m.Run())
+}
+
 func TestProseWordsExcludesFencedCode(t *testing.T) {
 	body := words(10) + "\n\n```ts\n" + words(500) + "\n```\n\n" + words(5)
 	if got := proseWords(body); got != 15 {
@@ -658,5 +674,74 @@ func TestRunHookDoesNotForwardASummaryToSiblings(t *testing.T) {
 		`"summary":"` + words(10) + `"}}`)
 	if out := runHookWithInput(raw); out != nil {
 		t.Fatalf("a summary-only create must reach no sibling and produce no output, got %+v", out)
+	}
+}
+
+// The failure this shipped to fix, at the hook boundary rather than in the package: a denied comment
+// carries the count and stops, while a denied issue description still gets the four-slot template.
+func TestRunHookDeniedCommentCarriesNoShapeTemplate(t *testing.T) {
+	clean(t)
+	raw := []byte(`{"tool_name":"mcp__atlassian__addCommentToJiraIssue","tool_input":{"cloudId":"c",` +
+		`"issueIdOrKey":"SRE-1","commentBody":"` + words(300) + `"}}`)
+	out := runHookWithInput(raw)
+	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("want deny, got %+v", out)
+	}
+	reason := out.HookSpecificOutput.PermissionDecisionReason
+	if strings.Contains(reason, "Four slots") {
+		t.Fatalf("a comment must not be told to become a defect report: %q", reason)
+	}
+	if !strings.Contains(reason, "300 words") {
+		t.Fatalf("the count is the part that is never wrong: %q", reason)
+	}
+}
+
+func TestRunHookDeniedIssueStillCarriesTheTemplate(t *testing.T) {
+	clean(t)
+	raw := []byte(`{"tool_name":"mcp__atlassian__createJiraIssue","tool_input":{"cloudId":"c",` +
+		`"projectKey":"SRE","summary":"short enough title","description":"` + words(300) + `"}}`)
+	out := runHookWithInput(raw)
+	if out == nil || !strings.Contains(out.HookSpecificOutput.PermissionDecisionReason, "Four slots") {
+		t.Fatalf("an issue description keeps the template: %+v", out)
+	}
+}
+
+// A summary over its own cap while the body is fine: the denial names the summary and nothing about
+// body structure, since advice comes from the field that is actually over.
+func TestRunHookOverSummaryUnderBodyCarriesNoBodyAdvice(t *testing.T) {
+	clean(t)
+	raw := []byte(`{"tool_name":"mcp__atlassian__createJiraIssue","tool_input":{"cloudId":"c",` +
+		`"projectKey":"SRE","summary":"` + words(30) + `","description":"a short body"}}`)
+	out := runHookWithInput(raw)
+	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("want deny, got %+v", out)
+	}
+	reason := out.HookSpecificOutput.PermissionDecisionReason
+	if !strings.Contains(reason, "This summary is 30 words") || strings.Contains(reason, "Four slots") {
+		t.Fatalf("want the summary count alone, got %q", reason)
+	}
+}
+
+// The per-class overrides reaching the hook: 300/160 pass a 300-word description and still deny a
+// 200-word comment, which one shared TICKETVOICE_MAX_WORDS cannot express.
+func TestRunHookPerClassBudgetOverrides(t *testing.T) {
+	clean(t)
+	t.Setenv("TICKETVOICE_MAX_ISSUE_WORDS", "300")
+	t.Setenv("TICKETVOICE_MAX_COMMENT_WORDS", "160")
+
+	desc := []byte(`{"tool_name":"mcp__atlassian__createJiraIssue","tool_input":{"cloudId":"c",` +
+		`"projectKey":"SRE","summary":"short title","description":"` + words(300) + `"}}`)
+	if out := runHookWithInput(desc); out == nil || out.HookSpecificOutput.PermissionDecision != "allow" {
+		t.Fatalf("300 words against a 300-word issue budget must pass, got %+v", out)
+	}
+
+	cmt := []byte(`{"tool_name":"mcp__atlassian__addCommentToJiraIssue","tool_input":{"cloudId":"c",` +
+		`"issueIdOrKey":"SRE-1","commentBody":"` + words(200) + `"}}`)
+	out := runHookWithInput(cmt)
+	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("200 words against a 160-word comment budget must deny, got %+v", out)
+	}
+	if !strings.Contains(out.HookSpecificOutput.PermissionDecisionReason, "160-word budget") {
+		t.Fatalf("the reason must name the class budget in force: %q", out.HookSpecificOutput.PermissionDecisionReason)
 	}
 }
