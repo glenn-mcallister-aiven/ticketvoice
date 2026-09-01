@@ -106,6 +106,27 @@ type jiraInput struct {
 	Description   json.RawMessage            `json:"description"`
 	CommentBody   json.RawMessage            `json:"commentBody"`
 	Fields        map[string]json.RawMessage `json:"fields"`
+	// AdditionalFields is where the Atlassian MCP puts everything without its own parameter, labels
+	// among them; an edit puts the same thing under Fields. Labels key shape advice, so a
+	// `wayfinder:map` Epic can be told something a plain Epic is not.
+	AdditionalFields map[string]json.RawMessage `json:"additional_fields"`
+}
+
+// jiraLabels reads the call's labels from wherever this tool put them — `additional_fields` on a
+// create, `fields` on an edit. Anything that is not an array of strings yields none, which costs a
+// key in the advice chain and nothing else.
+func jiraLabels(in jiraInput) []string {
+	for _, src := range []map[string]json.RawMessage{in.AdditionalFields, in.Fields} {
+		raw, ok := src["labels"]
+		if !ok {
+			continue
+		}
+		var labels []string
+		if json.Unmarshal(raw, &labels) == nil && len(labels) > 0 {
+			return labels
+		}
+	}
+	return nil
 }
 
 type bashInput struct {
@@ -118,10 +139,11 @@ type bashInput struct {
 type proseField struct {
 	Text string
 	Kind string
-	// Subtype is the tracker's name for what is being written, where the call states one. It is the
-	// same value on every field of a call — a create's title and body are both part of one Epic —
-	// carried per field so the advice lookup has it where the budget verdict already is.
+	// Subtype and Labels are the tracker's own statements about what is being written. Both are the
+	// same on every field of a call — a create's title and body are part of one Epic — carried per
+	// field so the advice lookup has them where the budget verdict already is.
 	Subtype string
+	Labels  []string
 	Budget  int
 }
 
@@ -189,9 +211,12 @@ func jsonString(raw json.RawMessage) string {
 // leaves the hook silent.
 func jiraProse(tool string, in jiraInput) []proseField {
 	var out []proseField
+	labels := jiraLabels(in)
 	add := func(text, kind string, budget int) {
 		if text != "" {
-			out = append(out, proseField{Text: text, Kind: kind, Subtype: in.IssueTypeName, Budget: budget})
+			out = append(out, proseField{
+				Text: text, Kind: kind, Subtype: in.IssueTypeName, Labels: labels, Budget: budget,
+			})
 		}
 	}
 	switch tool {
@@ -531,7 +556,7 @@ func runHookWithInput(raw []byte) *hookOutput {
 		}
 		overReasons = append(overReasons, reason)
 		if advice == "" {
-			advice, adviceNote = budgetgate.Advice(in.ToolName, f.Subtype, f.Kind)
+			advice, adviceNote = budgetgate.Advice(in.ToolName, f.Subtype, f.Kind, f.Labels...)
 		}
 	}
 	over := len(overReasons) > 0

@@ -222,19 +222,33 @@ One finding per comment. Lead with what changed since the last one.
 State what moved, what is blocked, and what you need. No mechanism recap.
 ```
 
-Keys are `<tracker>.<subtype>.<class>` or `<tracker>.<class>` — `jira`, `linear` or `github`, by
-`issue`, `comment` or `summary` — resolving to `default.<class>` when absent. The subtype is the
-tracker's own name for what is being written, where the call states one: Jira's `issueTypeName`, so
-`[jira.epic.issue]` can say what a project map should look like while `[jira.issue]` still covers a
-bug report. Nothing is inferred there — the type is a field the caller filled in. An Epic holding a
-project map was denied on 2026-09-01 and told to fill four defect slots, which a class-only key
-cannot tell apart. Every key carries a class deliberately: a bare `[jira]`
+Keys resolve most specific first, and `default.<class>` catches what nothing else does:
+
+```
+[<tracker>.label:<label>.<class>]   a label on the call, tried in the order the call carries them
+[<tracker>.<subtype>.<class>]       Jira's issueTypeName; only a create carries one
+[<tracker>.<class>]
+[default.<class>]
+```
+
+Tracker is `jira`, `linear` or `github`; class is `issue`, `comment` or `summary`. Labels match
+verbatim apart from case, separators included, so a Jira label of `wayfinder:map` is the section
+`[jira.label:wayfinder:map.issue]` — keys are constructed and looked up whole, never parsed, so a
+label carrying a separator is unambiguous rather than merely tolerated. The `label:` prefix keeps the
+two namespaces apart: a label named `bug` cannot be mistaken for the Bug issue type.
+
+A label sits ahead of the subtype because it is the finer signal — a `wayfinder:map` Epic and a plain
+Epic are different documents and the type alone cannot say which. Neither is the hook inferring a
+genre: both are fields the caller filled in before the hook ran, which is exactly what makes them
+usable. An Epic holding a project map was denied on 2026-09-01 and told to fill four defect slots,
+which a class-only key cannot tell from a bug report. Every key carries a class deliberately: a bare `[jira]`
 catch-all would hand the issue template to a Jira comment, which is the failure above. A section
 declared with no body suppresses the built-in, which is how you ask for the count alone.
 
-`TICKETVOICE_TEMPLATE=progress-update` names a section outright for a whole session, overriding the
-tracker and class default. That is the only lever on genre, and it is set by the operator rather than
-guessed by the hook. An unknown name falls through rather than emptying the advice.
+`TICKETVOICE_TEMPLATE=<name>` names a section outright, overriding every key above it. An unknown
+name falls through rather than emptying the advice. It is read from the hook's environment, so it
+applies to a whole session and is not a per-write handle — reaching a genre the call does not state
+means stating it, with a label.
 
 A file that is missing or over the cap leaves the built-in table standing and adds one line to the
 next denial saying so — the only abnormal path this tool does not pass over in silence, because an

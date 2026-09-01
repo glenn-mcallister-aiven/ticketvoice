@@ -333,3 +333,59 @@ func TestRelabelCorrectsTheDestination(t *testing.T) {
 		t.Fatalf("an empty note stays empty, got %q", got)
 	}
 }
+
+// A label is finer than a type — a wayfinder:map Epic and a plain Epic are different documents —
+// so it is tried first. Both are fields the caller filled in before the hook ran, which is what
+// makes either usable; TICKETVOICE_TEMPLATE is the only mechanism that could reach an unstated
+// genre, and being session-wide it reaches nothing in practice.
+func TestLabelKeyBeatsSubtype(t *testing.T) {
+	t.Setenv("TICKETVOICE_TEMPLATE_FILE", writeTemplateFile(t, `[jira.label:wayfinder:map.issue]
+Destination, settled, not yet specified, out of scope.
+
+[jira.epic.issue]
+A map, not a plan.
+`))
+	tool, kind := "mcp__atlassian__createJiraIssue", "issue description"
+
+	if got, _ := Advice(tool, "Epic", kind, "wayfinder:map"); got != "Destination, settled, not yet specified, out of scope." {
+		t.Fatalf("the label must beat the subtype, got %q", got)
+	}
+	// Verbatim apart from case: the section is the label as Jira carries it, separator and all.
+	if got, _ := Advice(tool, "Epic", kind, "Wayfinder:Map"); !strings.HasPrefix(got, "Destination,") {
+		t.Fatalf("label matching must not be case-sensitive, got %q", got)
+	}
+	// An unkeyed label costs one lookup and falls to the subtype.
+	if got, _ := Advice(tool, "Epic", kind, "enhancement"); got != "A map, not a plan." {
+		t.Fatalf("an unkeyed label falls through to the subtype, got %q", got)
+	}
+	// Several labels are tried in the order the call carries them.
+	if got, _ := Advice(tool, "Epic", kind, "enhancement", "wayfinder:map"); !strings.HasPrefix(got, "Destination,") {
+		t.Fatalf("every label is tried, got %q", got)
+	}
+	// A label cannot resurrect issue advice for a comment.
+	if got, _ := Advice("mcp__atlassian__addCommentToJiraIssue", "", "comment", "wayfinder:map"); got != "" {
+		t.Fatalf("a comment stays advice-free whatever the labels, got %q", got)
+	}
+	// No labels at all is the pre-existing path, unchanged.
+	if got, _ := Advice(tool, "Epic", kind); got != "A map, not a plan." {
+		t.Fatalf("a call with no labels resolves by subtype, got %q", got)
+	}
+}
+
+// A label named for an issue type must not be mistaken for one. The "label:" prefix is what keeps
+// the two namespaces apart.
+func TestLabelNamespaceDoesNotCollideWithSubtype(t *testing.T) {
+	t.Setenv("TICKETVOICE_TEMPLATE_FILE", writeTemplateFile(t, `[jira.bug.issue]
+Reached by issue type.
+
+[jira.label:bug.issue]
+Reached by label.
+`))
+	tool, kind := "mcp__atlassian__createJiraIssue", "issue description"
+	if got, _ := Advice(tool, "Task", kind, "bug"); got != "Reached by label." {
+		t.Fatalf("a `bug` label must reach the label section, got %q", got)
+	}
+	if got, _ := Advice(tool, "Bug", kind); got != "Reached by issue type." {
+		t.Fatalf("a Bug type must reach the type section, got %q", got)
+	}
+}

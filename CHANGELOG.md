@@ -1,5 +1,28 @@
 # Changelog
 
+## Key shape advice on the call's labels — 2026-09-01
+
+`TICKETVOICE_TEMPLATE` was described as the handle on genre, and it is not one. It is read from the
+hook's environment, so selecting a template means editing a session's `env` before the session
+starts — which nobody does, making every named section unreachable in practice. Two shipped example
+sections were dead configuration on that basis.
+
+A label is reachable, because the call already carries it. `[<tracker>.label:<label>.<class>]` now
+resolves ahead of the subtype, since a label is the finer signal: a `wayfinder:map` Epic and a plain
+Epic are different documents and `issueTypeName` alone cannot say which. Labels come from
+`additional_fields` on a create and `fields` on an edit, matched verbatim apart from case with their
+separators intact, so a Jira label of `wayfinder:map` is the section `[jira.label:wayfinder:map.issue]`.
+Keys are constructed and looked up whole rather than parsed, which is what makes a label containing
+the separator unambiguous instead of merely tolerated. The `label:` prefix keeps the namespaces
+apart, so a label named `bug` cannot be read as the Bug issue type.
+
+Nothing here infers a genre, and that remains the constraint rather than a limitation to work around.
+Both keys are fields the caller filled in before the hook ran. `TICKETVOICE_TEMPLATE` stays as the
+session-wide override it always was, now documented as one.
+
+Consequence: `Advice` takes labels variadically, so the two callers that have none are unchanged. A
+`labels` value that is not an array of strings costs one lookup in the chain and nothing else.
+
 ## Bound the sibling notes, key advice on issue type, stop naming Linear — 2026-09-01
 
 Three findings from the first live denial, a 936-word Jira Epic.

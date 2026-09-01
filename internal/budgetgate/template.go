@@ -135,13 +135,22 @@ func parseTemplates(s string) map[string]string {
 // the rest. Every key carries the class, so no lookup can end up handing issue advice to a comment.
 //
 // subtype is the tracker's own name for what is being written, where the call states one: Jira's
-// `issueTypeName`, so an Epic and a Bug can be told different things. That is not the hook guessing
-// at genre — it is a field the caller filled in. Measured on 2026-09-01, an Epic holding a project
-// map was denied and instructed to fill four defect-report slots, which is what a class-only key
-// cannot distinguish. Pass "" where the tracker states nothing.
+// `issueTypeName`, so an Epic and a Bug can be told different things. labels are the call's labels,
+// keyed "label:<label>" ahead of the subtype because a label is the finer signal — a `wayfinder:map`
+// Epic and a plain Epic are different documents, and the type alone cannot say so.
+//
+// Neither is the hook guessing at genre. Both are fields the caller filled in before the hook ran,
+// which is the whole reason they are usable: the one mechanism that could reach a genre the call
+// does not state is TICKETVOICE_TEMPLATE, and that is session-wide, so in practice it reaches
+// nothing. Measured on 2026-09-01, an Epic holding a project map was denied and instructed to fill
+// four defect-report slots, which is what a class-only key cannot distinguish.
+//
+// Labels are matched verbatim apart from case, so a Jira label of `wayfinder:map` is the section
+// `[jira.label:wayfinder:map.issue]`. Keys are constructed and looked up whole, never parsed, so a
+// label carrying the separator is unambiguous rather than merely tolerated.
 //
 // An empty result is an outcome, not a failure: the denial states the count and stops there.
-func Advice(tool, subtype, kind string) (advice, note string) {
+func Advice(tool, subtype, kind string, labels ...string) (advice, note string) {
 	ops, note := operatorAdvice()
 	keys := []string{}
 	if name := strings.ToLower(strings.TrimSpace(os.Getenv("TICKETVOICE_TEMPLATE"))); name != "" {
@@ -149,6 +158,11 @@ func Advice(tool, subtype, kind string) (advice, note string) {
 	}
 	class := KindClass(kind)
 	if vendor := Vendor(tool); vendor != "" {
+		for _, l := range labels {
+			if l = strings.ToLower(strings.TrimSpace(l)); l != "" {
+				keys = append(keys, vendor+".label:"+l+"."+class)
+			}
+		}
 		if sub := strings.ToLower(strings.TrimSpace(subtype)); sub != "" {
 			keys = append(keys, vendor+"."+sub+"."+class)
 		}

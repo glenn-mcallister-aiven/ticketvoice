@@ -745,3 +745,47 @@ func TestRunHookPerClassBudgetOverrides(t *testing.T) {
 		t.Fatalf("the reason must name the class budget in force: %q", out.HookSpecificOutput.PermissionDecisionReason)
 	}
 }
+
+// The plumbing most likely to be wrong: labels reach the advice lookup from where the Atlassian MCP
+// actually puts them — `additional_fields` on a create, `fields` on an edit.
+func TestRunHookLabelsReachAdviceFromBothPlaces(t *testing.T) {
+	clean(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "templates.txt")
+	if err := os.WriteFile(path, []byte("[jira.label:wayfinder:map.issue]\nDestination, settled, out of scope.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TICKETVOICE_TEMPLATE_FILE", path)
+
+	for name, raw := range map[string]string{
+		"create carries them in additional_fields": `{"tool_name":"mcp__atlassian__createJiraIssue","tool_input":{` +
+			`"cloudId":"c","projectKey":"SRE","issueTypeName":"Epic","summary":"short title",` +
+			`"additional_fields":{"labels":["wayfinder:map"]},"description":"` + words(300) + `"}}`,
+		"edit carries them in fields": `{"tool_name":"mcp__atlassian__editJiraIssue","tool_input":{` +
+			`"cloudId":"c","issueIdOrKey":"SRE-1","fields":{"labels":["wayfinder:map"],` +
+			`"description":"` + words(300) + `"}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := runHookWithInput([]byte(raw))
+			if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+				t.Fatalf("want deny, got %+v", out)
+			}
+			reason := out.HookSpecificOutput.PermissionDecisionReason
+			if !strings.Contains(reason, "Destination, settled, out of scope.") {
+				t.Fatalf("the label's section must be selected: %q", reason)
+			}
+			if strings.Contains(reason, "Four slots") {
+				t.Fatalf("the built-in must not also appear: %q", reason)
+			}
+		})
+	}
+
+	// A label array that is not an array of strings costs a lookup and nothing else.
+	raw := `{"tool_name":"mcp__atlassian__createJiraIssue","tool_input":{"cloudId":"c","projectKey":"SRE",` +
+		`"issueTypeName":"Epic","summary":"short title","additional_fields":{"labels":"wayfinder:map"},` +
+		`"description":"` + words(300) + `"}}`
+	out := runHookWithInput([]byte(raw))
+	if out == nil || !strings.Contains(out.HookSpecificOutput.PermissionDecisionReason, "Four slots") {
+		t.Fatalf("a malformed labels value must fall through to the built-in: %+v", out)
+	}
+}
