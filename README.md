@@ -70,8 +70,14 @@ Cut it and call again.
 ```bash
 git clone https://github.com/justinstimatze/ticketvoice
 cd ticketvoice
-make install   # builds ticketvoice and gh-write to $(go env GOPATH)/bin, version from git describe
+make install   # builds ticketvoice and gh-write to $GOBIN, or $(go env GOPATH)/bin, version from git describe
 ```
+
+`make install` follows `go install`: `GOBIN` when set — an environment variable, `go env -w
+GOBIN=...`, or `make install GOBIN=...` — and `GOPATH/bin` otherwise. Pick a directory that is on
+`PATH`. `gh-write` has to be: it is invoked as a bare command in the Bash call the hook is watching,
+so a `gh-write` the shell cannot resolve is a body that reaches `gh` ungated. `ticketvoice` itself
+does not care, since the hook runs it by absolute path.
 
 Then wire `ticketvoice` into `~/.claude/settings.json` as a `PreToolUse` hook on the four Linear
 write tools, the four Jira ones, and on `Bash` (for `gh-write` calls — see below). The path has to

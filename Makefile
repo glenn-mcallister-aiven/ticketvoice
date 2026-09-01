@@ -1,6 +1,17 @@
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 
+# Where to install, following `go install`: GOBIN when it is set — as an environment variable, via
+# `go env -w GOBIN=...`, or on the make command line — and GOPATH/bin otherwise. The destination has
+# to be a directory on PATH, because gh-write is invoked as a bare command in the Bash call the hook
+# is watching. GOPATH/bin is on nobody's PATH by default, so hardcoding it leaves an operator whose
+# tools live somewhere else (~/.local/bin, say, alongside cope-gate and basanite) copying two
+# binaries by hand after every build, and running a stale one the first time they forget.
+GOBIN ?= $(shell go env GOBIN)
+ifeq ($(strip $(GOBIN)),)
+GOBIN := $(shell go env GOPATH)/bin
+endif
+
 .PHONY: build install test check-readme
 
 build:
@@ -8,8 +19,8 @@ build:
 	go build $(LDFLAGS) -o bin/gh-write ./cmd/gh-write
 
 install:
-	go build $(LDFLAGS) -o $(shell go env GOPATH)/bin/ticketvoice .
-	go build $(LDFLAGS) -o $(shell go env GOPATH)/bin/gh-write ./cmd/gh-write
+	go build $(LDFLAGS) -o $(GOBIN)/ticketvoice .
+	go build $(LDFLAGS) -o $(GOBIN)/gh-write ./cmd/gh-write
 
 test:
 	go test ./...
