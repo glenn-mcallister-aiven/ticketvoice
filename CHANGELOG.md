@@ -1,5 +1,23 @@
 # Changelog
 
+## An edit is not a composition — 2026-09-01
+
+A description-only `editJiraIssue` against an Epic was denied and handed the four-slot defect
+template. Both signals the keying was built around were absent, and structurally so: `editJiraIssue`
+has no `issueTypeName` in its schema at all, and labels ride along only when the caller means to
+write them, which a description-only edit does not. It is the least-informed call this hook sees, and
+the keying had been designed around the call that carries everything.
+
+What the tool name already says is enough. An edit revises a document that has a shape; the writer is
+not composing a defect report, and telling them to is wrong for every edit rather than only for an
+Epic's. `[<tracker>.op:edit.<class>]` resolves below what the document is and above the bare class,
+and its built-in entry is empty, so an edit with nothing else stated gets the count and stops.
+`Operation` derives it from the tool rather than taking it as an argument, because the tool name is
+where the fact lives.
+
+Linear's patch-based `save_issue` is the same shape of operation and is not keyed, since its tool name
+does not distinguish a patch from a full-content write.
+
 ## Key shape advice on the call's labels — 2026-09-01
 
 `TICKETVOICE_TEMPLATE` was described as the handle on genre, and it is not one. It is read from the

@@ -227,9 +227,17 @@ Keys resolve most specific first, and `default.<class>` catches what nothing els
 ```
 [<tracker>.label:<label>.<class>]   a label on the call, tried in the order the call carries them
 [<tracker>.<subtype>.<class>]       Jira's issueTypeName; only a create carries one
+[<tracker>.op:edit.<class>]         an editJiraIssue, whatever it is editing
 [<tracker>.<class>]
 [default.<class>]
 ```
+
+An edit gets no advice at all by default. It revises a document that already has a shape, so the
+writer is not composing a defect report, and `editJiraIssue` is also the least-informed call this
+hook sees: its schema carries no `issueTypeName`, and labels ride along only when the caller means
+to write them. A description-only edit of an Epic was denied on 2026-09-01 and handed the four-slot
+template on exactly that basis. What the document is still wins over what is being done to it, so a
+label beats the operation; the operation beats the bare class.
 
 Tracker is `jira`, `linear` or `github`; class is `issue`, `comment` or `summary`. Labels match
 verbatim apart from case, separators included, so a Jira label of `wayfinder:map` is the section

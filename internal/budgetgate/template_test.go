@@ -389,3 +389,56 @@ Reached by label.
 		t.Fatalf("a Bug type must reach the type section, got %q", got)
 	}
 }
+
+// The failure this keying exists for: a description-only editJiraIssue carries no issueTypeName —
+// the schema has none — and no labels, since labels ride along only when the caller means to write
+// them. Measured on 2026-09-01, such an edit against an Epic got the four-slot defect template.
+func TestEditGetsNoDefectTemplateByDefault(t *testing.T) {
+	edit, create := "mcp__atlassian__editJiraIssue", "mcp__atlassian__createJiraIssue"
+
+	if got, _ := Advice(edit, "", "issue description"); got != "" {
+		t.Fatalf("an unkeyed edit must carry the count alone, got %q", got)
+	}
+	// A create with nothing stated is still composing something, so it keeps the template.
+	if got, _ := Advice(create, "", "issue description"); !strings.Contains(got, "Four slots") {
+		t.Fatalf("a create keeps the built-in template, got %q", got)
+	}
+	if Operation(edit) != "edit" || Operation(create) != "" {
+		t.Fatalf("Operation: edit=%q create=%q", Operation(edit), Operation(create))
+	}
+}
+
+// An edit's own section, and the precedence around it: what the thing is beats what is being done
+// to it, and both beat the bare class.
+func TestEditKeyPrecedence(t *testing.T) {
+	t.Setenv("TICKETVOICE_TEMPLATE_FILE", writeTemplateFile(t, `[jira.op:edit.issue]
+You are revising a document that already has a shape. Cut, do not restructure.
+
+[jira.label:wayfinder:map.issue]
+A map, and only a map.
+
+[jira.issue]
+Generic issue advice.
+`))
+	edit, kind := "mcp__atlassian__editJiraIssue", "issue description"
+
+	if got, _ := Advice(edit, "", kind); !strings.HasPrefix(got, "You are revising") {
+		t.Fatalf("an edit must reach its own section, got %q", got)
+	}
+	// A label says what the document is, which is the more useful thing to be told.
+	if got, _ := Advice(edit, "", kind, "wayfinder:map"); got != "A map, and only a map." {
+		t.Fatalf("a label must beat the operation, got %q", got)
+	}
+	// The operation still beats the bare class.
+	if got, _ := Advice(edit, "", kind, "unkeyed-label"); !strings.HasPrefix(got, "You are revising") {
+		t.Fatalf("the operation must beat jira.issue, got %q", got)
+	}
+	// A create is unaffected by the edit section.
+	if got, _ := Advice("mcp__atlassian__createJiraIssue", "", kind); got != "Generic issue advice." {
+		t.Fatalf("a create must not pick up the edit section, got %q", got)
+	}
+	// A comment stays advice-free whatever the operation.
+	if got, _ := Advice(edit, "", "comment"); got != "" {
+		t.Fatalf("the edit key must not resurrect advice for a comment, got %q", got)
+	}
+}

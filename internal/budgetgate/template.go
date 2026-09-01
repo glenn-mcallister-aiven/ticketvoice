@@ -32,10 +32,17 @@ const maxTemplateFile = 4 << 10
 // own one-line reason instead (EvaluateSummary).
 //
 // No vendor differs from the default yet. Vendor keys are what an operator file supplies.
+//
+// The edit entry is empty for the same reason the comment one is. An edit revises a document that
+// already has a shape, so the writer is not composing a defect report and telling them to is wrong
+// for every edit rather than only for an Epic's — and an edit is the least-informed call this hook
+// sees, since editJiraIssue has no issueTypeName in its schema and labels ride along only when the
+// caller means to write them.
 var builtinAdvice = map[string]string{
-	"default.issue":   slots,
-	"default.comment": "",
-	"default.summary": "",
+	"default.issue":         slots,
+	"default.comment":       "",
+	"default.summary":       "",
+	"default.op:edit.issue": "",
 }
 
 const slots = `Four slots, in this order:
@@ -55,6 +62,20 @@ func Vendor(tool string) string {
 		return "jira"
 	case tool == "Bash", tool == "github":
 		return "github"
+	}
+	return ""
+}
+
+// Operation is what a call does to something that already exists, where the tool name says so.
+// Derived from the tool rather than passed in, because the tool name is where the fact lives.
+//
+// Measured on 2026-09-01: a description-only editJiraIssue against an Epic resolved straight to the
+// four-slot defect template, having neither of the two signals the keying was built around. Linear's
+// patch-based save_issue is the same shape of operation but its tool name does not distinguish one
+// from a full-content write, so it is not keyed here.
+func Operation(tool string) string {
+	if tool == "mcp__atlassian__editJiraIssue" {
+		return "edit"
 	}
 	return ""
 }
@@ -149,6 +170,9 @@ func parseTemplates(s string) map[string]string {
 // `[jira.label:wayfinder:map.issue]`. Keys are constructed and looked up whole, never parsed, so a
 // label carrying the separator is unambiguous rather than merely tolerated.
 //
+// "op:<operation>" sits below both, above the bare class: what the call does to an existing thing
+// matters less than what that thing is, but more than the class alone. See Operation.
+//
 // An empty result is an outcome, not a failure: the denial states the count and stops there.
 func Advice(tool, subtype, kind string, labels ...string) (advice, note string) {
 	ops, note := operatorAdvice()
@@ -156,7 +180,7 @@ func Advice(tool, subtype, kind string, labels ...string) (advice, note string) 
 	if name := strings.ToLower(strings.TrimSpace(os.Getenv("TICKETVOICE_TEMPLATE"))); name != "" {
 		keys = append(keys, name)
 	}
-	class := KindClass(kind)
+	class, op := KindClass(kind), Operation(tool)
 	if vendor := Vendor(tool); vendor != "" {
 		for _, l := range labels {
 			if l = strings.ToLower(strings.TrimSpace(l)); l != "" {
@@ -166,7 +190,13 @@ func Advice(tool, subtype, kind string, labels ...string) (advice, note string) 
 		if sub := strings.ToLower(strings.TrimSpace(subtype)); sub != "" {
 			keys = append(keys, vendor+"."+sub+"."+class)
 		}
+		if op != "" {
+			keys = append(keys, vendor+".op:"+op+"."+class)
+		}
 		keys = append(keys, vendor+"."+class)
+	}
+	if op != "" {
+		keys = append(keys, "default.op:"+op+"."+class)
 	}
 	keys = append(keys, "default."+class)
 
