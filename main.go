@@ -177,8 +177,8 @@ func prose(tool string, raw json.RawMessage) (text string, budget int, kind stri
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return "", 0, ""
 	}
-	switch tool {
-	case "mcp__linear__save_issue":
+	switch budgetgate.Method(tool) {
+	case "save_issue":
 		if in.Description != "" {
 			return in.Description, budgetgate.IssueBudget, "issue description"
 		}
@@ -189,15 +189,15 @@ func prose(tool string, raw json.RawMessage) (text string, budget int, kind stri
 		if s := strings.TrimSpace(b.String()); s != "" {
 			return s, budgetgate.IssueBudget, "issue description patch"
 		}
-	case "mcp__linear__save_comment":
+	case "save_comment":
 		if in.Body != "" {
 			return in.Body, budgetgate.CommentBudget, "comment"
 		}
-	case "mcp__linear__save_diff_comment":
+	case "save_diff_comment":
 		if in.Body != "" {
 			return in.Body, budgetgate.CommentBudget, "diff comment"
 		}
-	case "mcp__linear__submit_diff_review":
+	case "submit_diff_review":
 		if in.Body != "" {
 			return in.Body, budgetgate.CommentBudget, "diff review"
 		}
@@ -233,16 +233,16 @@ func jiraProse(tool string, in jiraInput) []proseField {
 			})
 		}
 	}
-	switch tool {
-	case "mcp__atlassian__createJiraIssue":
+	switch budgetgate.Method(tool) {
+	case "createJiraIssue":
 		add(jsonString(in.Summary), "summary", budgetgate.SummaryBudget)
 		add(jsonString(in.Description), "issue description", budgetgate.IssueBudget)
-	case "mcp__atlassian__editJiraIssue":
+	case "editJiraIssue":
 		add(jsonString(in.Fields["summary"]), "summary", budgetgate.SummaryBudget)
 		add(jsonString(in.Fields["description"]), "issue description", budgetgate.IssueBudget)
-	case "mcp__atlassian__addCommentToJiraIssue":
+	case "addCommentToJiraIssue":
 		add(jsonString(in.CommentBody), "comment", budgetgate.CommentBudget)
-	case "mcp__atlassian__addWorklogToJiraIssue":
+	case "addWorklogToJiraIssue":
 		add(jsonString(in.CommentBody), "worklog comment", budgetgate.CommentBudget)
 	}
 	return out
@@ -366,7 +366,7 @@ func extractProse(tool string, raw json.RawMessage, cwd string) []proseField {
 			return nil
 		}
 		return []proseField{{Text: t, Kind: k, Budget: bud}}
-	case strings.HasPrefix(tool, "mcp__atlassian__"):
+	case budgetgate.Vendor(tool) == "jira":
 		var in jiraInput
 		if json.Unmarshal(raw, &in) != nil {
 			return nil
@@ -461,7 +461,7 @@ func bodyField(fields []proseField) proseField { return fields[len(fields)-1] }
 // therefore has nothing to forward and returns nil, which skips both subprocesses rather than
 // handing them an empty payload to guess at.
 func siblingStdin(tool string, raw []byte, fields []proseField) (stdin []byte, bridgedKind string) {
-	if !strings.HasPrefix(tool, "mcp__atlassian__") {
+	if budgetgate.Vendor(tool) != "jira" {
 		return raw, ""
 	}
 	for _, f := range fields {
@@ -484,23 +484,24 @@ func siblingStdin(tool string, raw []byte, fields []proseField) (stdin []byte, b
 // description does get tagged — that is a fresh post in a field, not a patch — and the
 // already-tagged guard in taggedInput keeps a second edit from stacking a second marker.
 func tagPath(tool, kind string) []string {
+	m := budgetgate.Method(tool)
 	switch {
-	case strings.HasPrefix(tool, "mcp__linear__"):
+	case budgetgate.Vendor(tool) == "linear":
 		switch kind {
 		case "issue description":
 			return []string{"description"}
 		case "comment", "diff comment", "diff review":
 			return []string{"body"}
 		}
-	case tool == "mcp__atlassian__createJiraIssue":
+	case m == "createJiraIssue":
 		if kind == "issue description" {
 			return []string{"description"}
 		}
-	case tool == "mcp__atlassian__editJiraIssue":
+	case m == "editJiraIssue":
 		if kind == "issue description" {
 			return []string{"fields", "description"}
 		}
-	case tool == "mcp__atlassian__addCommentToJiraIssue", tool == "mcp__atlassian__addWorklogToJiraIssue":
+	case m == "addCommentToJiraIssue", m == "addWorklogToJiraIssue":
 		return []string{"commentBody"}
 	}
 	return nil

@@ -751,6 +751,22 @@ func TestRunHookDeniesJiraCreateOnBothFieldsAtOnce(t *testing.T) {
 	}
 }
 
+// The server segment of an MCP tool name is the user's (or the claude.ai connector's) to choose.
+// Measured on 2026-09-08: the connector surfaced as `claude_ai_Atlassian_Rovo`, and a hook keyed on
+// `mcp__atlassian__` let a 200-word Jira comment through silently. Every dispatch keys on the method.
+func TestRunHookMatchesJiraByMethodNotServerName(t *testing.T) {
+	clean(t)
+	raw := []byte(`{"tool_name":"mcp__claude_ai_Atlassian_Rovo__addCommentToJiraIssue","tool_input":{"cloudId":"c",` +
+		`"issueIdOrKey":"RE-1","commentBody":"` + words(200) + `"}}`)
+	out := runHookWithInput(raw)
+	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("want deny, got %+v", out)
+	}
+	if got := tagPath("mcp__claude_ai_Atlassian_Rovo__editJiraIssue", "issue description"); len(got) != 2 {
+		t.Fatalf("tagPath under a connector server name = %v, want fields.description", got)
+	}
+}
+
 // The tag goes on the body, never the title: four characters out of a 20-word budget, spent in
 // every board view. Every field this hook never parses has to round-trip, since updatedInput
 // replaces the whole object rather than merging into it.

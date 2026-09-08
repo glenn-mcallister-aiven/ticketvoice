@@ -55,11 +55,14 @@ func TestKindClass(t *testing.T) {
 
 func TestVendor(t *testing.T) {
 	for tool, want := range map[string]string{
-		"mcp__linear__save_issue":               "linear",
-		"mcp__atlassian__addCommentToJiraIssue": "jira",
-		"Bash":                                  "github",
-		"github":                                "github",
-		"Write":                                 "",
+		"mcp__linear__save_issue":                      "linear",
+		"mcp__claude_ai_Linear__save_comment":          "linear",
+		"mcp__atlassian__addCommentToJiraIssue":        "jira",
+		"mcp__claude_ai_Atlassian_Rovo__editJiraIssue": "jira",
+		"mcp__atlassian__transitionJiraIssue":          "",
+		"Bash":                                         "github",
+		"github":                                       "github",
+		"Write":                                        "",
 	} {
 		if got := Vendor(tool); got != want {
 			t.Errorf("Vendor(%q) = %q, want %q", tool, got, want)

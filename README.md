@@ -208,6 +208,13 @@ Drop whichever tracker you don't use from the matcher. The Jira tools left out a
 carry no prose — `transitionJiraIssue`, `createIssueLink` and the rest — where the hook would have
 nothing to check.
 
+The `mcp__atlassian__` and `mcp__linear__` segments are server names, and they are whatever you
+called the server in `claude mcp add` — or whatever the claude.ai connector calls itself, which for
+Atlassian is currently `mcp__claude_ai_Atlassian_Rovo__`. The matcher has to name the server segment
+you actually have; check with `/mcp`, or read a tool name off any Jira call in a transcript. The
+binary itself does not care: it keys on the method after the last `__`, so any server name reaches
+the same checks once the matcher lets the call through.
+
 There's no installer subcommand — this is a plain hook binary, wired by hand once. Matching on
 `Bash` runs ticketvoice on every Bash call, but it's a fast regex check that returns immediately
 for anything that isn't a `gh-write` invocation — see [Development](#development) for the cost.

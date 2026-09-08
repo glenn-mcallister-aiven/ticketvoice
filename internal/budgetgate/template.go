@@ -52,13 +52,44 @@ const slots = `Four slots, in this order:
   4. The fix, as a code block, plus one line on how to prove it can go red.
 SHAs and file:line carry the detail; do not narrate what the reader can open.`
 
+// Method strips the MCP server segment off a hook tool name, so "mcp__atlassian__editJiraIssue"
+// and "mcp__claude_ai_Atlassian_Rovo__editJiraIssue" both read as "editJiraIssue". The server
+// segment is whatever the user named it in `claude mcp add`, or whatever the claude.ai connector
+// is called this month — measured on 2026-09-08, the Atlassian connector surfaced as
+// `claude_ai_Atlassian_Rovo`, and a hook keyed on `mcp__atlassian__` let every Jira write through
+// unchecked. The method name is the one part the MCP server itself controls, so it is the only
+// stable thing to key on. A name with no MCP prefix (Bash, github) comes back as is.
+func Method(tool string) string {
+	rest, ok := strings.CutPrefix(tool, "mcp__")
+	if !ok {
+		return tool
+	}
+	if _, m, ok := strings.Cut(rest, "__"); ok {
+		return m
+	}
+	return tool
+}
+
+// The methods each tracker's MCP exposes that carry prose. Membership here, not the server
+// segment, is what makes a call a Linear or a Jira write.
+var (
+	linearMethods = map[string]bool{
+		"save_issue": true, "save_comment": true, "save_diff_comment": true, "submit_diff_review": true,
+	}
+	jiraMethods = map[string]bool{
+		"createJiraIssue": true, "editJiraIssue": true,
+		"addCommentToJiraIssue": true, "addWorklogToJiraIssue": true,
+	}
+)
+
 // Vendor maps a calling tool to the tracker whose conventions apply. A Bash call reaching this
 // package is a gh-write invocation, which is the GitHub surface.
 func Vendor(tool string) string {
+	m := Method(tool)
 	switch {
-	case strings.HasPrefix(tool, "mcp__linear__"):
+	case linearMethods[m]:
 		return "linear"
-	case strings.HasPrefix(tool, "mcp__atlassian__"):
+	case jiraMethods[m]:
 		return "jira"
 	case tool == "Bash", tool == "github":
 		return "github"
@@ -74,7 +105,7 @@ func Vendor(tool string) string {
 // patch-based save_issue is the same shape of operation but its tool name does not distinguish one
 // from a full-content write, so it is not keyed here.
 func Operation(tool string) string {
-	if tool == "mcp__atlassian__editJiraIssue" {
+	if Method(tool) == "editJiraIssue" {
 		return "edit"
 	}
 	return ""
