@@ -345,5 +345,13 @@ func judgeSHAs(cwd, text string) (notes []string, ids []string) {
 			ids = append(ids, "cite:sha:"+sha)
 		}
 	}
+	// A merge cited seconds after it landed isn't in the local clone until the next fetch — the
+	// linear-mcp-strict canary hit this twice on 2026-09-24 with real SHAs. The refusal stays: an
+	// unfetched commit is still unverified. Fetching here would put the network on the hot path.
+	if len(notes) > 0 {
+		notes = append(notes, fetchHint)
+	}
 	return notes, ids
 }
+
+const fetchHint = "If one of these is a merge that just landed, run `git fetch origin` and call again."

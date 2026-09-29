@@ -293,3 +293,17 @@ func TestJudgeCleanWhenNothingCited(t *testing.T) {
 		t.Fatalf("want fully clean, got %+v ids=%v", j, ids)
 	}
 }
+
+func TestJudgeSHAMissingSuggestsFetch(t *testing.T) {
+	dir, realSHA := setupGitRepo(t)
+	j, ids := Judge(context.Background(), nil, dir, "Merged as `"+strings.Repeat("d", 40)+"` and `"+strings.Repeat("e", 40)+"`.")
+	if !j.Flagged || len(ids) != 2 {
+		t.Fatalf("want both bogus SHAs flagged, got %+v ids=%v", j, ids)
+	}
+	if n := strings.Count(j.Note, "git fetch origin"); n != 1 {
+		t.Fatalf("want the fetch hint exactly once, got %d in:\n%s", n, j.Note)
+	}
+	if j, _ := Judge(context.Background(), nil, dir, "Merged as `"+realSHA+"`."); strings.Contains(j.Note, "git fetch") {
+		t.Fatalf("no fetch hint when every SHA exists, got %q", j.Note)
+	}
+}
