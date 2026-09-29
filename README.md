@@ -241,8 +241,9 @@ directory on `PATH`:
 ```
 
 There's no installer subcommand — this is a plain hook binary, wired by hand once. Matching on
-`Bash` runs ticketvoice on every Bash call, but it's a fast regex check that returns immediately
-for anything that isn't a `gh-write` invocation — see [Development](#development) for the cost.
+`Bash` runs ticketvoice on every Bash call, but it's a fast string check that returns immediately
+for anything that isn't a `gh-write` call or a raw `gh` write — see [Development](#development)
+for the cost.
 
 ## gh-write: GitHub issues and PRs
 
@@ -257,7 +258,19 @@ EOF
 gh-write pr comment 42 <<'EOF'
 lgtm
 EOF
+
+gh-write pr review 42 --approve <<'EOF'
+One nit in the retry loop, fine to land.
+EOF
+
+gh-write comment edit 2918375521 --repo you/repo <<'EOF'
+The trimmed comment.
+EOF
 ```
+
+`pr review` with no `--approve`, `--comment` or `--request-changes` goes out as `--comment`. `comment
+edit` rewrites one existing issue or PR conversation comment by its id, through `gh api`; to edit
+your own last comment, `gh-write issue comment 42 --edit-last` also works.
 
 Everything gh-write doesn't recognize (`--repo`, `--label`, `--base`, `--draft`, ...) passes
 straight through to `gh`, unchanged. `--body`, `-b`, `--body-file`, `-F`, and their `=value` forms
@@ -265,6 +278,15 @@ are refused outright, so a body can only arrive on stdin — as a heredoc, a `< 
 pipe.
 
 Every body gh-write sends is also prefixed with an agent tag — see [Agent tag](#agent-tag).
+
+**A raw `gh` write is denied.** `gh issue|pr create|comment|edit` or `gh pr review` with `--body`,
+`-b`, `--body-file` or `-F`, and `gh api` with a `body=` field, are refused at the hook with the
+`gh-write` command that carries the same body — `gh-write pr comment 1568 < comment.md` for a
+`--body-file`. The flag's presence decides it; the body is never parsed. Only a `gh` in command
+position counts, so a commit message or heredoc that mentions one is left alone. If `gh-write`
+isn't on `PATH` the hook lets the call through, since there'd be nothing to point at. Not covered:
+`gh release --notes`, `gh gist`, and a `gh` call hidden behind `bash -c`, `eval` or a script file.
+PR review line comments sent through `gh api` are denied with no `gh-write` form to point at yet.
 
 **Why this exists**, and why it isn't as simple as pointing ticketvoice's matcher at `gh` itself:
 ticketvoice reads a Bash `PreToolUse` call's `tool_input.command` — the same opaque shell string
@@ -278,9 +300,10 @@ doesn't fail open the way an unparseable Linear call does — it can match the w
 gate at all.
 
 gh-write turns that into a much narrower problem: it owns a single, fixed CLI grammar, so the
-only thing ticketvoice has to find is `gh-write (issue|pr) (create|comment|edit)` followed by a
+only thing ticketvoice has to find is a `gh-write` call in command position followed by a
 heredoc or a `< file` redirect — both literal text, no shell escaping to resolve, extractable
-without a tokenizer (`ghWriteProse` in `main.go`). Covers issue and PR create/comment/edit,
+without a tokenizer (`ghWriteProse` in `main.go`). Covers issue and PR create/comment/edit, PR
+reviews and comment edits,
 matching the Linear surface this hook already covers (issues and comments) — not release notes,
 which are a different genre (a changelog, not a ticket) that this gate isn't shaped for.
 

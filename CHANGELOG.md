@@ -1,5 +1,25 @@
 # Changelog
 
+## A raw `gh` write is denied and pointed at gh-write — 2026-09-29
+
+A 318-word `gh pr comment 1568 --body-file <path>` went out with no check on 2026-09-28: the hook
+ran on the Bash call, found no `gh-write`, and exited 0. The same text as a Linear comment is
+denied at 120 words. A `gh issue|pr create|comment|edit` or `gh pr review` with a body flag, and a
+`gh api` call with a `body=` field, are now denied with the `gh-write` command that replaces them.
+gh-write gains `pr review` and `comment edit <id>`, so every denied form has a gated equivalent.
+The hook fails open when `gh-write` isn't installed.
+
+A `gh-write` call now only counts in command position. Writing this change, a script whose own
+heredoc quoted a `gh-write issue create ... <<'EOF'` usage line had its test file scored as an
+issue description and refused.
+
+## An unfetched SHA's refusal says to fetch — 2026-09-29
+
+On the linear-mcp-strict canary, citecheck twice refused a merge SHA the agent cited seconds after
+merging, before its clone had fetched it (`fafaeb1ab9`, `7252b44b38`). The refusal stays, and now
+ends with "If one of these is a merge that just landed, run `git fetch origin` and call again."
+The hook doesn't fetch, which would put the network on its hot path.
+
 ## clause_symmetry only warns on a linear-strict comment — 2026-09-25
 
 A strict comment reports evidence, and "X happened, but Y has not" is often the whole finding. On

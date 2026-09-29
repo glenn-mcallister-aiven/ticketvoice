@@ -79,6 +79,12 @@ func Classify(object, verb string) (kind string, budget int) {
 	if verb == "comment" {
 		return object + " comment", CommentBudget
 	}
+	if verb == "review" {
+		return "PR review", CommentBudget
+	}
+	if object == "comment" {
+		return "comment", CommentBudget
+	}
 	if object == "pr" {
 		return "PR description", IssueBudget
 	}

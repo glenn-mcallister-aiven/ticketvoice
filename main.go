@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
@@ -41,6 +42,7 @@ import (
 	"github.com/justinstimatze/ticketvoice/internal/autorewrite"
 	"github.com/justinstimatze/ticketvoice/internal/budgetgate"
 	"github.com/justinstimatze/ticketvoice/internal/citecheck"
+	"github.com/justinstimatze/ticketvoice/internal/ghcmd"
 	"github.com/justinstimatze/ticketvoice/internal/impactline"
 	"github.com/justinstimatze/ticketvoice/internal/linearclient"
 )
@@ -180,8 +182,11 @@ func prose(tool string, raw json.RawMessage) (text string, budget int, kind stri
 }
 
 var (
-	ghWriteInvoke = regexp.MustCompile(`\bgh-write\s+(issue|pr)\s+(create|comment|edit)\b`)
-	heredocOpener = regexp.MustCompile(`<<-?\s*(['"]?)(\w+)['"]?[ \t]*\r?\n`)
+	// Exactly two groups, always both set: ghWriteProse slices them unconditionally, so an
+	// alternation that leaves one unset would panic, and a panicking hook blocks the call. A pair
+	// gh-write itself refuses (comment create) is scored here and then refused by gh-write.
+	ghWriteInvoke = regexp.MustCompile(`\bgh-write\s+(issue|pr|comment)\s+(create|comment|edit|review)\b`)
+	heredocOpener = ghcmd.HeredocOpener
 )
 
 // maxRedirectBytes caps how much of a `< file` redirect target ghWriteProse will read. A ticket
@@ -242,7 +247,15 @@ func findRedirectPath(rest string) (path string, ok bool) {
 // would produce means running it, and a text matcher has no business doing that — see gh-write's
 // own budgetgate call for the backstop that covers this case instead.
 func ghWriteProse(command, cwd string) (text, kind string, budget int, ok bool) {
-	inv := ghWriteInvoke.FindStringSubmatchIndex(command)
+	// Only a gh-write that is the command being run counts: the phrase inside a quoted string or
+	// another command's heredoc body is text about gh-write, not a call to it.
+	var inv []int
+	for _, m := range ghWriteInvoke.FindAllStringSubmatchIndex(command, -1) {
+		if ghcmd.InCommandPosition(command, m[0]) {
+			inv = m
+			break
+		}
+	}
 	if inv == nil {
 		return "", "", 0, false
 	}
@@ -339,7 +352,7 @@ func linearIdentity(raw json.RawMessage) string {
 
 // ghWriteTargetID matches the numeric id gh-write's own CLI grammar puts after comment/edit — the
 // issue or PR the call is already about, not one it's about to create.
-var ghWriteTargetID = regexp.MustCompile(`\b(?:issue|pr)\s+(?:comment|edit)\s+(\d+)\b`)
+var ghWriteTargetID = regexp.MustCompile(`\b(?:issue|pr|comment)\s+(?:comment|edit|review)\s+(\d+)\b`)
 
 // agentTagRune is budgetgate.AgentTag without its trailing space, for the already-tagged test. What
 // follows the emoji is the writer's business — a space, a newline, nothing — and only the emoji
@@ -660,6 +673,9 @@ func runHookWithInput(raw []byte) *hookOutput {
 		return runStrict(in, strictTools[name])
 	}
 	in.ToolName = canonicalTool(in.ToolName)
+	if out := denyRawGhWrite(in); out != nil {
+		return out
+	}
 	text, rawBudget, kind := extractProse(in.ToolName, in.ToolInput, in.Cwd)
 	if text == "" {
 		return nil
@@ -797,6 +813,64 @@ func runHookWithInput(raw []byte) *hookOutput {
 	out.HookSpecificOutput.PermissionDecision = "deny"
 	out.HookSpecificOutput.PermissionDecisionReason = reason
 	return &out
+}
+
+// denyRawGhWrite refuses a raw gh write whose body sits in a flag ticketvoice can't read, and names
+// the gh-write command that carries the same body where it can. There is no body to judge and a
+// compliant path always exists, so this never touches attemptstate and never softens. When gh-write
+// isn't installed there is no compliant path, and it fails open like a missing cope-gate.
+func denyRawGhWrite(in hookInput) *hookOutput {
+	if in.ToolName != "Bash" {
+		return nil
+	}
+	var b bashInput
+	if json.Unmarshal(in.ToolInput, &b) != nil {
+		return nil
+	}
+	w, ok := ghcmd.RawWrite(b.Command)
+	if !ok {
+		return nil
+	}
+	if _, err := exec.LookPath("gh-write"); err != nil {
+		return nil
+	}
+	var out hookOutput
+	out.HookSpecificOutput.HookEventName = "PreToolUse"
+	out.HookSpecificOutput.PermissionDecision = "deny"
+	out.HookSpecificOutput.PermissionDecisionReason = rawGhDenyReason(w)
+	return &out
+}
+
+// rawGhDenyReason names the gh-write command that replaces w, with the redirect form first when the
+// body is already in a file, since ghWriteProse scores a `< path` redirect directly.
+func rawGhDenyReason(w ghcmd.Write) string {
+	var head, cmd string
+	switch {
+	case w.Object == "api" && w.Target != "":
+		head = "This `gh api` call edits a comment's body in a -f/-F field, which ticketvoice can't score."
+		cmd = "gh-write comment edit " + w.Target + " --repo <owner>/<repo>"
+	case w.Object == "api":
+		return "This `gh api` call sends a body in a -f/-F field, which ticketvoice can't score, and gh-write has no form for it. " +
+			"Post a new issue or PR comment with `gh-write <issue|pr> comment <number>` and the body on stdin instead. " +
+			"PR review line comments have no gated path yet."
+	default:
+		head = fmt.Sprintf("This `gh %s %s` carries its body in a flag, which ticketvoice can't score.", w.Object, w.Verb)
+		parts := []string{"gh-write", w.Object, w.Verb}
+		if w.Target != "" {
+			parts = append(parts, w.Target)
+		}
+		cmd = strings.Join(append(parts, w.Passthrough...), " ")
+	}
+	file := w.BodyFile
+	if file == "" || file == "-" {
+		file = w.Redirect
+	}
+	reason := head + " Use gh-write, which reads the body on stdin and runs the same budget and cope/basanite checks:\n\n"
+	if file != "" {
+		reason += "  " + cmd + " < " + file + "\n\nor with the text inline:\n\n"
+	}
+	reason += "  " + cmd + " <<'EOF'\n  ...\n  EOF\n\nMake that call now — asking the operator to post it by hand is the failure this reason exists to prevent."
+	return reason
 }
 
 func runHook() {

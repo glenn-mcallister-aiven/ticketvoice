@@ -1,6 +1,8 @@
 // Command gh-write wraps `gh issue`/`gh pr` writes, forcing body text through stdin (a
 // quoted heredoc, e.g. `gh-write issue create --title T <<'EOF' ... EOF`) instead of a
-// --body or --body-file flag.
+// --body or --body-file flag. `pr review <id>` posts a review, and `comment edit <id>` edits an
+// existing conversation comment through the REST API. Those are the two raw gh writes
+// ticketvoice's hook denies that had no gh-write form before.
 //
 // The reason is ticketvoice, not gh-write itself. ticketvoice's PreToolUse hook gates
 // prose against a word budget and forwards it to cope/basanite, but for a Bash call it
@@ -36,36 +38,95 @@ import (
 	"strings"
 
 	"github.com/justinstimatze/ticketvoice/internal/budgetgate"
+	"github.com/justinstimatze/ticketvoice/internal/ghcmd"
 )
 
-var bodyFlags = map[string]bool{
-	"--body": true, "-b": true, "--body-file": true, "-F": true,
-}
-
-func rejectsBody(arg string) bool {
-	return bodyFlags[arg] || strings.HasPrefix(arg, "--body=") || strings.HasPrefix(arg, "--body-file=")
-}
-
-// validate checks the object/verb/flags shape and returns the gh args to run (object, verb,
-// and whatever's left of args), or a usage error to print instead. Split out of run so the
-// exec/exit-code plumbing there isn't tangled up with argument checking.
+// validate checks the object/verb/flags shape and returns the gh args to run, or a usage error to
+// print instead. Split out of run so the exec/exit-code plumbing there isn't tangled up with
+// argument checking.
 func validate(args []string) (ghArgs []string, usageErr string) {
 	if len(args) < 2 {
-		return nil, "usage: gh-write <issue|pr> <create|comment|edit> [id] [gh flags...]"
+		return nil, "usage: gh-write <issue|pr> <create|comment|edit> [id] [gh flags...]\n       gh-write pr review <id> [--approve|--comment|--request-changes] [gh flags...]\n       gh-write comment edit <comment-id> [--repo owner/repo]"
 	}
 	object, verb := args[0], args[1]
-	if object != "issue" && object != "pr" {
-		return nil, fmt.Sprintf("gh-write: unsupported object %q (want issue or pr)", object)
-	}
-	if verb != "create" && verb != "comment" && verb != "edit" {
-		return nil, fmt.Sprintf("gh-write: unsupported verb %q (want create, comment, or edit)", verb)
+	switch object {
+	case "issue", "pr":
+		if verb != "create" && verb != "comment" && verb != "edit" && !(object == "pr" && verb == "review") {
+			return nil, fmt.Sprintf("gh-write: unsupported verb %q for %s (want create, comment, or edit; pr also takes review)", verb, object)
+		}
+	case "comment":
+		if verb != "edit" {
+			return nil, fmt.Sprintf("gh-write: unsupported verb %q for comment (want edit)", verb)
+		}
+	default:
+		return nil, fmt.Sprintf("gh-write: unsupported object %q (want issue, pr, or comment)", object)
 	}
 	for _, a := range args[2:] {
-		if rejectsBody(a) {
+		if ghcmd.IsBodyFlag(a) {
 			return nil, fmt.Sprintf("gh-write: %s is not accepted — pipe or heredoc the body on stdin instead, so it lands in the Bash command text ticketvoice reads", a)
 		}
 	}
-	return args, ""
+	switch {
+	case object == "comment":
+		return commentEditArgs(args[2:])
+	case verb == "review":
+		return reviewArgs(args), ""
+	}
+	return append(append([]string{}, args...), "--body-file", "-"), ""
+}
+
+// reviewArgs defaults a review with no verdict to --comment: gh pr review refuses a body without
+// one of the three modes, and a body with no verdict is a comment.
+func reviewArgs(args []string) []string {
+	out := append([]string{}, args...)
+	hasMode := false
+	for _, a := range args[2:] {
+		switch a {
+		case "--approve", "-a", "--comment", "-c", "--request-changes", "-r":
+			hasMode = true
+		}
+	}
+	if !hasMode {
+		out = append(out, "--comment")
+	}
+	return append(out, "--body-file", "-")
+}
+
+// commentEditArgs edits one existing issue or PR conversation comment by id. gh has no command for
+// that except `--edit-last`, so this goes through the REST API, with the body read from stdin.
+func commentEditArgs(rest []string) (ghArgs []string, usageErr string) {
+	repo := "{owner}/{repo}"
+	id := ""
+	for i := 0; i < len(rest); i++ {
+		a := rest[i]
+		switch {
+		case (a == "--repo" || a == "-R") && i+1 < len(rest):
+			repo = rest[i+1]
+			i++
+		case strings.HasPrefix(a, "--repo="):
+			repo = strings.TrimPrefix(a, "--repo=")
+		case id == "" && isDigits(a):
+			id = a
+		default:
+			return nil, fmt.Sprintf("gh-write: comment edit takes a comment id and --repo only, not %q", a)
+		}
+	}
+	if id == "" {
+		return nil, "usage: gh-write comment edit <comment-id> [--repo owner/repo]"
+	}
+	return []string{"api", "-X", "PATCH", "repos/" + repo + "/issues/comments/" + id, "-F", "body=@-"}, ""
+}
+
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // gateBody runs the same word-budget and sibling-scorer check ticketvoice's own PreToolUse hook
@@ -113,7 +174,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	text := string(body)
 
-	if blocked, reason := gateBody(ghArgs[0], ghArgs[1], text); blocked {
+	if blocked, reason := gateBody(args[0], args[1], text); blocked {
 		fmt.Fprintln(stderr, reason)
 		return 1
 	}
@@ -122,7 +183,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		text = budgetgate.AgentTag + text
 	}
 
-	cmd := exec.Command("gh", append(ghArgs, "--body-file", "-")...)
+	cmd := exec.Command("gh", ghArgs...)
 	cmd.Stdin = strings.NewReader(text)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr

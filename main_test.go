@@ -125,6 +125,34 @@ func TestGhWriteProseExtractsHeredocBody(t *testing.T) {
 			wantOK:  false,
 		},
 		{
+			name:       "comment edit",
+			command:    "gh-write comment edit 9 --repo o/r <<'EOF'\ntrimmed\nEOF\n",
+			wantText:   "trimmed",
+			wantKind:   "comment",
+			wantBudget: defaultCommentBudget,
+			wantOK:     true,
+		},
+		{
+			name:       "pr review",
+			command:    "gh-write pr review 5 --approve <<'EOF'\nship it\nEOF\n",
+			wantText:   "ship it",
+			wantKind:   "PR review",
+			wantBudget: defaultCommentBudget,
+			wantOK:     true,
+		},
+		{
+			// Hit live while writing this change: a script whose own heredoc quoted a gh-write
+			// usage line had its test file scored as an issue description.
+			name:    "gh-write named inside another command's heredoc",
+			command: "python3 - <<'PY'\ndoc = \"gh-write issue create --title T <<'EOF' ... EOF\"\nPY\ncat > t.go <<'EOF'\nlots of test code\nEOF\n",
+			wantOK:  false,
+		},
+		{
+			name:    "gh-write named in a quoted argument",
+			command: "echo \"run gh-write pr comment 1 <<'EOF'\"\ncat <<'EOF'\nnot a body\nEOF\n",
+			wantOK:  false,
+		},
+		{
 			name:       "chained with && before it, on the same line",
 			command:    "cd /some/repo && gh-write issue create --title T <<'EOF'\nhello there\nEOF\n",
 			wantText:   "hello there",
@@ -954,5 +982,87 @@ func TestATacticlaunchCommentIsScored(t *testing.T) {
 	raw := []byte(`{"session_id":"s","tool_name":"mcp__linear-full__linear_createComment","tool_input":{"issueId":"CUR-1","body":"` + words(overBudgetWords) + `"}}`)
 	if runHookWithInput(raw) == nil {
 		t.Fatal("an over-budget comment through linear-full's linear_createComment produced no verdict")
+	}
+}
+
+// stubGhWrite puts an executable named gh-write first on PATH, so the raw-gh deny doesn't depend on
+// whether this machine has the real one installed. It is never run.
+func stubGhWrite(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "gh-write"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func bashHookPayload(t *testing.T, command string) []byte {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{"tool_name": "Bash", "tool_input": map[string]string{"command": command}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// FEEDBACK 2026-09-28: a 318-word `gh pr comment --body-file` went out with no check at all, while
+// the same text as a Linear comment was denied.
+func TestRunHookDeniesRawGhBodyWrites(t *testing.T) {
+	clean(t)
+	stubGhWrite(t)
+	for _, tc := range []struct{ command, want string }{
+		{"gh pr comment 1568 --body-file /abs/path/comment.md", "gh-write pr comment 1568 < /abs/path/comment.md"},
+		{`gh pr comment 1568 --body "$(cat /abs/path/comment.md)"`, "gh-write pr comment 1568 <<'EOF'"},
+		{"gh issue comment 3 -F notes.md --repo o/r", "gh-write issue comment 3 --repo o/r < notes.md"},
+		{"gh pr comment 1 --body-file - < x.md", "gh-write pr comment 1 < x.md"},
+		{`gh pr review 5 --approve -b "looks good"`, "gh-write pr review 5 --approve <<'EOF'"},
+		{"gh api -X PATCH repos/o/r/issues/comments/9 -f body=trimmed", "gh-write comment edit 9"},
+	} {
+		t.Run(tc.command, func(t *testing.T) {
+			out := runHookWithInput(bashHookPayload(t, tc.command))
+			if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+				t.Fatalf("want a deny, got %+v", out)
+			}
+			if reason := out.HookSpecificOutput.PermissionDecisionReason; !strings.Contains(reason, tc.want) {
+				t.Fatalf("reason must name %q, got:\n%s", tc.want, reason)
+			}
+		})
+	}
+}
+
+func TestRunHookLeavesOtherGhCallsAlone(t *testing.T) {
+	clean(t)
+	stubGhWrite(t)
+	for _, command := range []string{
+		"gh pr view 1568",
+		"gh pr create --fill",
+		"gh issue edit 5 --add-label bug",
+		`git commit -m "deny a raw gh pr comment --body"`,
+	} {
+		if out := runHookWithInput(bashHookPayload(t, command)); out != nil {
+			t.Errorf("%q: want no hook output, got %+v", command, out.HookSpecificOutput)
+		}
+	}
+}
+
+// With no gh-write to point at, the deny would leave no compliant path, so it fails open the same
+// way a missing cope-gate does.
+func TestRunHookRawGhFailsOpenWithoutGhWrite(t *testing.T) {
+	clean(t)
+	t.Setenv("PATH", t.TempDir())
+	if out := runHookWithInput(bashHookPayload(t, "gh pr comment 1568 --body-file /abs/path/comment.md")); out != nil {
+		t.Fatalf("want no hook output without gh-write on PATH, got %+v", out.HookSpecificOutput)
+	}
+}
+
+func TestGhWriteIdentityCoversNewVerbs(t *testing.T) {
+	for command, want := range map[string]string{
+		"gh-write pr review 5 --approve <<'EOF'\nx\nEOF":     "5",
+		"gh-write comment edit 9 --repo o/r <<'EOF'\nx\nEOF": "9",
+		"gh-write issue create --title T <<'EOF'\nx\nEOF":    "",
+	} {
+		if got := ghWriteIdentity(command); got != want {
+			t.Errorf("ghWriteIdentity(%q) = %q, want %q", command, got, want)
+		}
 	}
 }
