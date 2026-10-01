@@ -30,6 +30,14 @@ func TestMain(m *testing.M) {
 	} {
 		_ = os.Unsetenv(v)
 	}
+	// A flagged Linear write in any test reaches auto-rewrite, which spends real money whenever a
+	// key resolves. Unsetting ANTHROPIC_API_KEY is not enough on its own: tokensrc.Resolve also
+	// reads a .env up the tree and ~/.config/ticketvoice/.env, which on a developer machine holds a
+	// real key. So the endpoint is pointed at a closed local port as well, and whatever key resolves,
+	// the call fails fast and the hook falls back to deny. fakeAutorewriteServer overrides this with
+	// t.Setenv.
+	_ = os.Unsetenv("ANTHROPIC_API_KEY")
+	_ = os.Setenv("TICKETVOICE_ANTHROPIC_ENDPOINT", "http://127.0.0.1:1")
 	os.Exit(m.Run())
 }
 
