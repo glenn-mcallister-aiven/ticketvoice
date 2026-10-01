@@ -35,7 +35,14 @@ func AgentTagEnabled() bool {
 }
 
 // Budgets in words of prose, fenced code excluded. An issue body carries a mechanism, its
-// evidence, the exposure and the fix; a comment carries one of those.
+// evidence, the exposure, the fix, and a leading plain-language impact line; a comment carries one
+// of those.
+//
+// IssueBudget was 150 until 2026-09-14. The impact line arrived after that number was set and it is
+// the one slot written for a reader who cannot open the file paths, so it cannot be compressed the
+// way the technical slots can — 150 left real tickets choosing between the mechanism and the
+// impact. 200 also puts the budget at headerFloor rather than below it, so the two constants agree
+// about when a body is long enough to deserve structure instead of contradicting each other.
 //
 // SummaryBudget covers a title field rather than a body — Jira's `summary`, the one tracker field
 // this gate sees that has no Linear counterpart it forwards (Linear's title is never extracted).
@@ -44,7 +51,7 @@ func AgentTagEnabled() bool {
 // read as correctly sized; 20 denies the two that put a whole finding in the title. The field's own
 // hard ceiling is Jira's 255 characters, which nothing in that sample came within 45 of.
 const (
-	IssueBudget   = 150
+	IssueBudget   = 200
 	CommentBudget = 120
 	SummaryBudget = 20
 	// Below this, section headers cost more lines than the structure they buy.
@@ -80,6 +87,12 @@ func HeaderCount(s string) int {
 func Classify(object, verb string) (kind string, budget int) {
 	if verb == "comment" {
 		return object + " comment", CommentBudget
+	}
+	if verb == "review" {
+		return "PR review", CommentBudget
+	}
+	if object == "comment" {
+		return "comment", CommentBudget
 	}
 	if object == "pr" {
 		return "PR description", IssueBudget
@@ -133,12 +146,23 @@ func BudgetForKind(kind string, base int) int {
 // only — what to do about it differs by caller (a hook can deny and let Claude retry; a CLI can
 // only refuse and explain), so that line is each caller's own to append.
 func Evaluate(text, kind string, budget int) (over bool, reason string) {
+	return EvaluateWith(text, kind, budget, "")
+}
+
+// EvaluateWith is Evaluate with the advice on what to keep supplied by the caller, for text that
+// is one part of a ticket rather than a whole body or comment (a single description section). A
+// whole body's advice comes from Advice (template.go), which callers append themselves, so
+// Evaluate passes no guidance here.
+func EvaluateWith(text, kind string, budget int, guidance string) (over bool, reason string) {
 	words := ProseWords(text)
 	if words <= budget {
 		return false, ""
 	}
 	reason = fmt.Sprintf("This %s is %d words of prose against a %d-word budget — %d over.",
 		kind, words, budget, words-budget)
+	if guidance != "" {
+		reason += "\n\n" + guidance
+	}
 	// The header nag is shape advice, so it is scoped the way the templates are (template.go):
 	// telling a 160-word comment to carry fewer sections is the same misfire as handing it the
 	// four-slot defect template.
@@ -312,7 +336,23 @@ func judgeSibling(bin string, args []string, rawStdin []byte) Judgment {
 // repeats. That is the correct amount."), so a second caller here alongside cope's own registered
 // hook lands on the same answer independently — no race.
 func JudgeCope(rawStdin []byte) Judgment {
-	return judgeSibling(binPath("TICKETVOICE_COPE_GATE", "cope-gate"), []string{"-pretool"}, rawStdin)
+	j := judgeSibling(binPath("TICKETVOICE_COPE_GATE", "cope-gate"), []string{"-pretool"}, rawStdin)
+	j.Note = dropCopePreamble(j.Note)
+	return j
+}
+
+// cope's note opens by saying its hits are a warning and "the call proceeds", and names the tool
+// in the payload it was handed. Relayed inside a ticketvoice refusal, that sentence contradicts the
+// refusal around it, and for a linear-strict call it names the wrong tool, so it is dropped: whether
+// the call proceeds is ticketvoice's to say.
+func dropCopePreamble(note string) string {
+	if !strings.HasPrefix(note, "cope scored the prose") {
+		return note
+	}
+	if _, rest, found := strings.Cut(note, "\n\n"); found {
+		return strings.TrimSpace(rest)
+	}
+	return note
 }
 
 // JudgeBasanite calls basanite writecheck -no-dedup — the flag basanite added specifically for

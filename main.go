@@ -35,15 +35,19 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/justinstimatze/ticketvoice/internal/attemptstate"
+	"github.com/justinstimatze/ticketvoice/internal/autorewrite"
 	"github.com/justinstimatze/ticketvoice/internal/budgetgate"
 	"github.com/justinstimatze/ticketvoice/internal/citecheck"
+	"github.com/justinstimatze/ticketvoice/internal/ghcmd"
 	"github.com/justinstimatze/ticketvoice/internal/impactline"
 	"github.com/justinstimatze/ticketvoice/internal/linearclient"
 )
@@ -83,6 +87,38 @@ func buildVersion() string {
 		return rev + "-dirty"
 	}
 	return rev
+}
+
+// linearTools are the official Linear MCP server's write tools. Claude Code names an MCP tool
+// `mcp__<server>__<tool>`, and <server> is whatever the local config calls it — `linear`,
+// `linear-official`, anything — so matching the server segment breaks on a rename (it did: every
+// write through `linear-official` went unscored). The tool segment is Linear's own and stable, so
+// match on that and treat any server name as the canonical `mcp__linear__` form.
+var linearTools = map[string]string{
+	// The official server (mcp.linear.app).
+	"save_issue": "save_issue", "save_comment": "save_comment",
+	"save_diff_comment": "save_diff_comment", "submit_diff_review": "submit_diff_review",
+	// @tacticlaunch/mcp-linear, which carries the same prose in the same fields — `description` on
+	// an issue, `body` on a comment — so each maps onto the official tool whose checks already fit.
+	"linear_createIssue": "save_issue", "linear_updateIssue": "save_issue",
+	"linear_createComment": "save_comment", "linear_updateComment": "save_comment",
+}
+
+// canonicalTool maps `mcp__<any server>__<linear write tool>` onto the `mcp__linear__` form the
+// checks below are written against.
+func canonicalTool(tool string) string {
+	rest, ok := strings.CutPrefix(tool, "mcp__")
+	if !ok {
+		return tool
+	}
+	i := strings.LastIndex(rest, "__")
+	if i < 0 {
+		return tool
+	}
+	if canonical, ok := linearTools[rest[i+2:]]; ok {
+		return "mcp__linear__" + canonical
+	}
+	return tool
 }
 
 type hookInput struct {
@@ -249,8 +285,11 @@ func jiraProse(tool string, in jiraInput) []proseField {
 }
 
 var (
-	ghWriteInvoke = regexp.MustCompile(`\bgh-write\s+(issue|pr)\s+(create|comment|edit)\b`)
-	heredocOpener = regexp.MustCompile(`<<-?\s*(['"]?)(\w+)['"]?[ \t]*\r?\n`)
+	// Exactly two groups, always both set: ghWriteProse slices them unconditionally, so an
+	// alternation that leaves one unset would panic, and a panicking hook blocks the call. A pair
+	// gh-write itself refuses (comment create) is scored here and then refused by gh-write.
+	ghWriteInvoke = regexp.MustCompile(`\bgh-write\s+(issue|pr|comment)\s+(create|comment|edit|review)\b`)
+	heredocOpener = ghcmd.HeredocOpener
 )
 
 // maxRedirectBytes caps how much of a `< file` redirect target ghWriteProse will read. A ticket
@@ -311,7 +350,15 @@ func findRedirectPath(rest string) (path string, ok bool) {
 // would produce means running it, and a text matcher has no business doing that — see gh-write's
 // own budgetgate call for the backstop that covers this case instead.
 func ghWriteProse(command, cwd string) (text, kind string, budget int, ok bool) {
-	inv := ghWriteInvoke.FindStringSubmatchIndex(command)
+	// Only a gh-write that is the command being run counts: the phrase inside a quoted string or
+	// another command's heredoc body is text about gh-write, not a call to it.
+	var inv []int
+	for _, m := range ghWriteInvoke.FindAllStringSubmatchIndex(command, -1) {
+		if ghcmd.InCommandPosition(command, m[0]) {
+			inv = m
+			break
+		}
+	}
 	if inv == nil {
 		return "", "", 0, false
 	}
@@ -433,7 +480,12 @@ func trackerIdentity(raw json.RawMessage) string {
 
 // ghWriteTargetID matches the numeric id gh-write's own CLI grammar puts after comment/edit — the
 // issue or PR the call is already about, not one it's about to create.
-var ghWriteTargetID = regexp.MustCompile(`\b(?:issue|pr)\s+(?:comment|edit)\s+(\d+)\b`)
+var ghWriteTargetID = regexp.MustCompile(`\b(?:issue|pr|comment)\s+(?:comment|edit|review)\s+(\d+)\b`)
+
+// agentTagRune is budgetgate.AgentTag without its trailing space, for the already-tagged test. What
+// follows the emoji is the writer's business — a space, a newline, nothing — and only the emoji
+// itself says whether a body carries the tag.
+const agentTagRune = "\U0001F916"
 
 // ghWriteIdentity mirrors trackerIdentity for a Bash gh-write call. A create call has no target
 // yet, so it returns "" the same way a fresh Linear or Jira issue does.
@@ -516,7 +568,11 @@ func tagField(obj map[string]json.RawMessage, field string) bool {
 		return false
 	}
 	var val string
-	if json.Unmarshal(rawVal, &val) != nil || strings.HasPrefix(val, budgetgate.AgentTag) {
+	// Already-tagged is tested on the RUNE, not on AgentTag's "🤖 " with its trailing space. A body
+	// that opens "🤖\n\nImpact: ..." — tag on its own line, which is what a writer does when the
+	// impact leads — is tagged, and comparing against the spaced form read it as untagged and
+	// prepended a second one. Observed live 2026-09-14: descriptions posted with "🤖 🤖".
+	if json.Unmarshal(rawVal, &val) != nil || strings.HasPrefix(strings.TrimLeft(val, " \t"), agentTagRune) {
 		return false
 	}
 	tagged, err := json.Marshal(budgetgate.AgentTag + val)
@@ -569,6 +625,42 @@ func taggedInput(tool string, raw json.RawMessage, kind string) json.RawMessage 
 		return nil
 	}
 
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
+// taggedRewrite substitutes an auto-rewritten candidate for the original field's value — unlike
+// taggedInput, whose entire job IS the tag, so it returns nil when tagging is disabled.
+// Here the substitution is the job, and the tag is secondary: returning nil on a disabled tag would
+// silently let an already-flagged original body through unmodified whenever TICKETVOICE_NO_AGENT_TAG
+// is set, defeating the whole feature. So the field is always replaced with candidate, prefixed
+// with the tag only when AgentTagEnabled() is true. nil is reserved for a genuine failure to
+// determine the field or round-trip the input as an object — the caller already treats that as
+// ok=false, never as "let the original text through."
+func taggedRewrite(tool string, raw json.RawMessage, kind, candidate string) json.RawMessage {
+	// Only a top-level field is replaced: auto-rewrite is Linear-only (see tryAutoRewrite), and
+	// every Linear path tagPath returns is one element long.
+	path := tagPath(tool, kind)
+	if len(path) != 1 {
+		return nil
+	}
+	field := path[0]
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
+		return nil
+	}
+	val := candidate
+	if budgetgate.AgentTagEnabled() {
+		val = budgetgate.AgentTag + val
+	}
+	tagged, err := json.Marshal(val)
+	if err != nil {
+		return nil
+	}
+	obj[field] = tagged
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return nil
@@ -646,6 +738,129 @@ func stalledNote(kind string, attempt int, cope, basanite, impact budgetgate.Jud
 	return b.String()
 }
 
+// tryAutoRewrite attempts one auto-fix for a flagged Linear write, replacing "deny and hope the
+// calling agent retries" with "rewrite, verify, then allow" for the categories a rewrite can
+// actually fix (over-budget length, a cope voice/structure hit, a basanite vocabulary tic).
+// Returns ok=false — meaning "fall through to today's deny-and-retry behavior, unchanged" — for
+// anything not a Linear MCP tool (a Bash/gh-write call has no field to apply a rewrite to), a
+// patch (same reason), any check outside the auto-fixable set (citations, impact — see the plan's
+// Context section for why those are excluded on purpose), a missing autorewrite client, or a
+// rewrite whose candidate doesn't fully re-validate clean. Never touches internal/attemptstate —
+// only runHookWithInput does, exactly once, on whichever branch actually runs.
+func tryAutoRewrite(in hookInput, kind, text string, over bool, budgetReason string, budget int,
+	cope, basanite, citations, impact budgetgate.Judgment, linear *linearclient.Client,
+	rewriter *autorewrite.Client) (candidate json.RawMessage, rewritten string, ok bool) {
+
+	// TODO: extend to Jira. A Jira comment is one field and would fit as is; a create or edit
+	// carries a summary and a body, and this takes one.
+	if budgetgate.Vendor(in.ToolName) != "linear" {
+		return nil, "", false
+	}
+	if citations.Flagged || impact.Flagged {
+		return nil, "", false
+	}
+	if len(tagPath(in.ToolName, kind)) != 1 {
+		return nil, "", false
+	}
+	if !over && !cope.Flagged && !basanite.Flagged {
+		return nil, "", false
+	}
+	if rewriter == nil {
+		return nil, "", false
+	}
+
+	var violations []string
+	if over {
+		violations = append(violations, budgetReason)
+	}
+	if cope.Flagged {
+		violations = append(violations, cope.Note)
+	}
+	if basanite.Flagged {
+		violations = append(violations, basanite.Note)
+	}
+
+	var err error
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	rewritten, err = rewriter.Rewrite(ctx, kind, text, violations)
+	if err != nil {
+		return nil, "", false
+	}
+
+	// Re-validate the CANDIDATE against every check the original text went through, not just the
+	// ones that triggered the rewrite — concurrently, so this second pass doesn't stack on top of
+	// the rewrite call's own 8s. A rewrite that trims a paragraph could just as easily mangle a
+	// citation or delete an impact line that was there.
+	var newCope, newBasanite, newCitations budgetgate.Judgment
+	var wg sync.WaitGroup
+	wg.Add(3)
+	candPayload := budgetgate.LinearPayload(kind, rewritten)
+	go func() { defer wg.Done(); newCope = judgeCope(candPayload) }()
+	go func() { defer wg.Done(); newBasanite = judgeBasanite(candPayload) }()
+	go func() {
+		defer wg.Done()
+		newCitations, _ = citecheck.Judge(context.Background(), linear, in.Cwd, rewritten)
+	}()
+	wg.Wait()
+
+	if newOver, _ := evaluate(rewritten, kind, budget); newOver {
+		return nil, "", false
+	}
+	if newCope.Flagged || newBasanite.Flagged || newCitations.Flagged {
+		return nil, "", false
+	}
+	if kind == "issue description" && impactline.Judge(rewritten).Flagged {
+		return nil, "", false
+	}
+
+	// A length or voice rewrite may drop prose, never evidence, and may add none: a candidate that
+	// loses a SHA, ticket id, path or URL, or introduces one the author never wrote, is a different
+	// ticket wearing the same title (22 Sep 2026: a rewrite of CUR-1689 invented a go-red criterion).
+	if !sameEvidence(text, rewritten) {
+		return nil, "", false
+	}
+
+	out := taggedRewrite(in.ToolName, in.ToolInput, kind, rewritten)
+	if out == nil {
+		return nil, "", false
+	}
+	return out, rewritten, true
+}
+
+var evidencePats = []*regexp.Regexp{
+	regexp.MustCompile(`\b[0-9a-f]{7,40}\b`),
+	regexp.MustCompile(`\b[A-Z]{2,5}-\d+\b`),
+	regexp.MustCompile(`(?:^|[^\w/])#\d{2,5}\b`),
+	regexp.MustCompile(`https?://[^\s)>\]` + "`" + `]+`),
+	regexp.MustCompile(`[\w./-]+\.(?:ts|js|mjs|svelte|py|sh|yml|yaml|json|md|go|toml|sql)(?::\d+(?:-\d+)?)?`),
+}
+
+// evidenceTokens is the set of citation-shaped tokens in s: SHAs, ticket ids, PR numbers, URLs and
+// file paths. Two texts with the same set carry the same evidence, whatever else changed.
+func evidenceTokens(s string) map[string]bool {
+	out := map[string]bool{}
+	for _, re := range evidencePats {
+		for _, m := range re.FindAllString(s, -1) {
+			out[strings.Trim(strings.TrimSpace(m), "#.,;:")] = true
+		}
+	}
+	return out
+}
+
+func sameEvidence(orig, cand string) bool {
+	a, b := evidenceTokens(orig), evidenceTokens(cand)
+	if len(a) != len(b) {
+		return false
+	}
+	for t := range a {
+		if !b[t] {
+			return false
+		}
+	}
+	return true
+}
+
 // runHookWithInput is the hook's decision logic, taking the raw bytes so the same bytes can be
 // forwarded to the siblings unmodified and so this runs without a subprocess in tests. Returns nil
 // when the call should proceed with no hook involvement at all — untagged, since there was nothing
@@ -663,6 +878,13 @@ func runHookWithInput(raw []byte) *hookOutput {
 	// A hook that cannot parse its input must not block the call it was watching.
 	if json.Unmarshal(raw, &in) != nil {
 		return nil
+	}
+	if name, ok := strictTool(in.ToolName); ok {
+		return runStrict(in, strictTools[name])
+	}
+	in.ToolName = canonicalTool(in.ToolName)
+	if out := denyRawGhWrite(in); out != nil {
+		return out
 	}
 	fields := extractProse(in.ToolName, in.ToolInput, in.Cwd)
 	if len(fields) == 0 {
@@ -774,6 +996,27 @@ func runHookWithInput(raw []byte) *hookOutput {
 		return &out
 	}
 
+	// Try to fix it instead of denying it, before any attempt-counting starts — see
+	// tryAutoRewrite's own doc comment for the exact scope this covers. TICKETVOICE_NO_AUTOREWRITE
+	// skips even resolving a client, so a set flag costs nothing beyond the check itself.
+	if os.Getenv("TICKETVOICE_NO_AUTOREWRITE") == "" {
+		rewriter, _ := autorewrite.New(in.Cwd)
+		// A Linear call carries exactly one field, so the body is the whole of what was judged.
+		budget := budgetgate.BudgetForKind(body.Kind, body.Budget)
+		if candidate, rewritten, ok := tryAutoRewrite(in, body.Kind, body.Text, over, strings.Join(overReasons, "\n\n"), budget, cope, basanite, citations, impact, linear, rewriter); ok {
+			attemptstate.Clear(key)
+			var out hookOutput
+			out.HookSpecificOutput.HookEventName = "PreToolUse"
+			out.HookSpecificOutput.PermissionDecision = "allow"
+			out.HookSpecificOutput.UpdatedInput = candidate
+			// Say so. A silent swap leaves the caller believing its own draft was stored.
+			out.HookSpecificOutput.AdditionalContext = fmt.Sprintf("ticketvoice rewrote this %s before saving it "+
+				"(your draft was flagged for length or voice). What was stored:\n\n%s\n\nIf that lost or changed "+
+				"anything you meant, save your own revision over it.", body.Kind, rewritten)
+			return &out
+		}
+	}
+
 	var impactIDs []string
 	if impact.Flagged {
 		impactIDs = []string{impactline.ViolationID}
@@ -838,6 +1081,64 @@ func runHookWithInput(raw []byte) *hookOutput {
 	out.HookSpecificOutput.PermissionDecision = "deny"
 	out.HookSpecificOutput.PermissionDecisionReason = reason
 	return &out
+}
+
+// denyRawGhWrite refuses a raw gh write whose body sits in a flag ticketvoice can't read, and names
+// the gh-write command that carries the same body where it can. There is no body to judge and a
+// compliant path always exists, so this never touches attemptstate and never softens. When gh-write
+// isn't installed there is no compliant path, and it fails open like a missing cope-gate.
+func denyRawGhWrite(in hookInput) *hookOutput {
+	if in.ToolName != "Bash" {
+		return nil
+	}
+	var b bashInput
+	if json.Unmarshal(in.ToolInput, &b) != nil {
+		return nil
+	}
+	w, ok := ghcmd.RawWrite(b.Command)
+	if !ok {
+		return nil
+	}
+	if _, err := exec.LookPath("gh-write"); err != nil {
+		return nil
+	}
+	var out hookOutput
+	out.HookSpecificOutput.HookEventName = "PreToolUse"
+	out.HookSpecificOutput.PermissionDecision = "deny"
+	out.HookSpecificOutput.PermissionDecisionReason = rawGhDenyReason(w)
+	return &out
+}
+
+// rawGhDenyReason names the gh-write command that replaces w, with the redirect form first when the
+// body is already in a file, since ghWriteProse scores a `< path` redirect directly.
+func rawGhDenyReason(w ghcmd.Write) string {
+	var head, cmd string
+	switch {
+	case w.Object == "api" && w.Target != "":
+		head = "This `gh api` call edits a comment's body in a -f/-F field, which ticketvoice can't score."
+		cmd = "gh-write comment edit " + w.Target + " --repo <owner>/<repo>"
+	case w.Object == "api":
+		return "This `gh api` call sends a body in a -f/-F field, which ticketvoice can't score, and gh-write has no form for it. " +
+			"Post a new issue or PR comment with `gh-write <issue|pr> comment <number>` and the body on stdin instead. " +
+			"PR review line comments have no gated path yet."
+	default:
+		head = fmt.Sprintf("This `gh %s %s` carries its body in a flag, which ticketvoice can't score.", w.Object, w.Verb)
+		parts := []string{"gh-write", w.Object, w.Verb}
+		if w.Target != "" {
+			parts = append(parts, w.Target)
+		}
+		cmd = strings.Join(append(parts, w.Passthrough...), " ")
+	}
+	file := w.BodyFile
+	if file == "" || file == "-" {
+		file = w.Redirect
+	}
+	reason := head + " Use gh-write, which reads the body on stdin and runs the same budget and cope/basanite checks:\n\n"
+	if file != "" {
+		reason += "  " + cmd + " < " + file + "\n\nor with the text inline:\n\n"
+	}
+	reason += "  " + cmd + " <<'EOF'\n  ...\n  EOF\n\nMake that call now — asking the operator to post it by hand is the failure this reason exists to prevent."
+	return reason
 }
 
 func runHook() {

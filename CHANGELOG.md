@@ -1,5 +1,99 @@
 # Changelog
 
+## Merge upstream v0.5.5 into the Jira branch — 2026-10-01
+
+Upstream's auto-rewrite and linear-strict were written against one prose field per call; this
+branch extracts a list of them, so a Jira create carries a summary and a body. Where the two met:
+
+- Auto-rewrite stays Linear-only, the scope upstream gave it. A Linear call carries one field, so
+  it is fed the body field; extending it to Jira is left for later.
+- `budgetgate.Evaluate` stays diagnostic-only, with shape advice appended by callers from
+  `Advice`. Upstream's `EvaluateWith` keeps its guidance argument for linear-strict's sections and
+  appends it only when non-empty, so a whole body is not handed the four-slot template twice.
+- The already-tagged test moves to upstream's rune comparison inside `tagField`, so a Jira body
+  opening "🤖" on its own line is not tagged a second time.
+- The README matcher takes upstream's any-server `mcp__.*__` form with the Jira methods added.
+
+## A raw `gh` write is denied and pointed at gh-write — 2026-09-29
+
+A 318-word `gh pr comment 1568 --body-file <path>` went out with no check on 2026-09-28: the hook
+ran on the Bash call, found no `gh-write`, and exited 0. The same text as a Linear comment is
+denied at 120 words. A `gh issue|pr create|comment|edit` or `gh pr review` with a body flag, and a
+`gh api` call with a `body=` field, are now denied with the `gh-write` command that replaces them.
+gh-write gains `pr review` and `comment edit <id>`, so every denied form has a gated equivalent.
+The hook fails open when `gh-write` isn't installed.
+
+A `gh-write` call now only counts in command position. Writing this change, a script whose own
+heredoc quoted a `gh-write issue create ... <<'EOF'` usage line had its test file scored as an
+issue description and refused.
+
+## An unfetched SHA's refusal says to fetch — 2026-09-29
+
+On the linear-mcp-strict canary, citecheck twice refused a merge SHA the agent cited seconds after
+merging, before its clone had fetched it (`fafaeb1ab9`, `7252b44b38`). The refusal stays, and now
+ends with "If one of these is a merge that just landed, run `git fetch origin` and call again."
+The hook doesn't fetch, which would put the network on its hot path.
+
+## clause_symmetry only warns on a linear-strict comment — 2026-09-25
+
+A strict comment reports evidence, and "X happened, but Y has not" is often the whole finding. On
+the canary, clause_symmetry refused such a comment twice and the agent cut a fact to get past it.
+When it is cope's only hit on a strict comment, the comment posts and the hit comes back as a
+warning. With any other cope hit, or on a description section, it refuses as before.
+
+## A refusal no longer quotes cope saying the call proceeds — 2026-09-25
+
+cope's note opens with a paragraph saying its hits are a warning and "the call proceeds", naming
+the tool in the payload it was handed. Relayed inside a ticketvoice refusal, that told the agent
+the opposite of what happened, and on a linear-strict call it named the official server's tool.
+The paragraph is dropped; the hits and their advice are kept.
+
+## A ticked item's citation gets its own budget — 2026-09-25
+
+linear-strict counts rewording a Done when item as dropping it, so an item keeps the text it was
+written with. On the canary, a 36-word item that passed when written was refused once its
+14-word citation was added, with no way to fit both. A ticked item's text and its citation are
+now each held to the 40-word line budget.
+
+## A linear-strict comment gets 150 words — 2026-09-25
+
+A comment through linear-strict is the log entry for evidence whose detail already lives in the
+description. On the canary, 7 of 67 such comments ran over 120 words. Every cut kept its citations
+except one, which dropped a PR number, and the cost was a retry on one comment in ten. Comments
+through the official server keep 120.
+
+## Judge linear-strict's section writes as sections — 2026-09-25
+
+[linear-strict](https://github.com/justinstimatze/linear-strict) writes a ticket as named description
+sections, patched one at a time: `set_state`, `comment` (text plus an optional patch) and
+`create_issue`. Its hook used to pass each section in disguised as a `save_comment`, so an Observed
+section got the comment's 120-word budget and its four-slot advice, and a rewrite of one section
+could not be put back, which turned it into a refusal carrying the whole rewritten ticket.
+
+ticketvoice now reads those three tools itself, on any MCP server whose name contains "linear".
+A comment's text and each section are judged on their own. Cause, Fix and any other prose section
+get 120 words with advice written for that section. Observed, Done when and Open questions are
+lists that grow as evidence lands, so the section has no total; each line gets 40 words instead.
+cope and basanite skip the list sections: on a canary replay of 71 real calls, every hit they made
+on an Observed section read two evidence lines as one sentence. Citations are still checked there.
+A rewrite of a prose section goes back into that section, with no agent tag, since the server heads
+its own writes. `set_status` carries no new text and is left alone.
+
+## Four fixes from live use — 2026-09-14 to 2026-09-22
+
+- **The issue budget is 200 words, up from 150.** The impact line arrived after 150 was set, and it
+  is written for a reader who can't open the file paths, so it can't be compressed the way the
+  technical slots can. At 150, tickets had to choose between the mechanism and the impact.
+- **The agent tag no longer hides the impact line.** An agent-written description starts with
+  "🤖 ", so one that led with its impact read "🤖 Impact: …", and the impact check called it
+  missing. The check now allows the tag in front, and the already-tagged test matches the emoji
+  whatever follows it, which stops a second tag being added.
+- **Linear writes are matched by tool name under any MCP server name.** Writes through a server
+  registered as `linear-official` or `linear-full` matched nothing and went out unscored.
+- **An auto-rewrite may not add or drop evidence, and says when it was stored.** A rewrite must
+  carry exactly the original's SHAs, ticket ids, PR numbers, URLs and file paths, or it is dropped
+  and the ordinary deny runs. A stored rewrite is disclosed with the text that was stored.
+
 ## Jira meets the impact line, citations, and retry escalation — 2026-09-08
 
 Merging upstream v0.3.1 into the Jira branch made two decisions the merge could not dodge. Both
@@ -16,6 +110,66 @@ follow the kind a field already carries rather than the tracker it came from:
 
 The sibling forward keeps its Jira bridge inside upstream's new goroutine group: a summary-only call
 still skips both subprocesses, and the citation check runs on the body regardless.
+## Auto-rewrite flagged Linear writes instead of denying them — 2026-09-05
+
+`FEEDBACK.md` (2026-09-04) named a real gap in the deny-and-retry design: the reason is supposed to
+go to Claude, not a human, but sometimes the calling session asks the operator to fix the ticket by
+hand instead of retrying — the earlier 3-attempt escalation narrows the window for that but can't
+force it, since it's advisory text aimed at another agent's judgment, not a mechanical gate. For the
+categories a rewrite can actually fix — over-budget length, a cope or basanite flag — `internal/
+autorewrite` now makes one bounded call to fix the text itself before ever denying, then
+re-validates the candidate against every check (not just the ones that triggered the rewrite) before
+letting it through. Citations and the impact line stay deny-and-retry, deliberately: neither has a
+correct auto-fix ticketvoice could guess.
+
+Hand-rolled `net/http`, not the official Anthropic SDK — checked the SDK's own `go.mod` first and
+found it pulls in ~50 transitive packages (AWS SDK v2, gRPC, protobuf, OpenTelemetry, two YAML
+libraries, `testify`) for a project that's been stdlib-only since it started. `basanite/internal/
+judge/cell.go` already solves this exact problem (a live, latency-sensitive, forced-tool-use
+Anthropic call) with a hand-rolled request over `net/http`, so this follows that precedent instead —
+same shape (explicit timeout, no retry, forced tool-use, ephemeral `cache_control`), a different
+model (Sonnet 5 here, since this is generation, not cell.go's classification) and a bigger
+`max_tokens` (cell.go's `512` was sized for a one-word verdict, not a full ticket body).
+
+Two things caught only by testing against the real API, not assumed from `cell.go`'s example:
+
+- `temperature: 0` (copied straight from `cell.go`) gets a `400: "temperature is deprecated for
+  this model"` on `claude-sonnet-5` — current-generation models reject sampling params outright.
+  `cell.go`'s Haiku model predates that; the field is dropped entirely here.
+- The re-validation pass runs cope, basanite, and citecheck concurrently against the rewrite
+  candidate, mirroring the hook's existing first-pass concurrency — a sequential re-check would
+  stack on top of the rewrite call's own latency instead of overlapping it.
+
+`internal/linearclient`'s token-resolution helpers moved to a new `internal/tokensrc` package so
+`ANTHROPIC_API_KEY` and `TICKETVOICE_LINEAR_TOKEN` share one implementation instead of a second copy
+of the same env-var/`.env`-walk/global-fallback chain.
+
+On by default once `ANTHROPIC_API_KEY` resolves — the first check in this tool that spends real,
+metered money automatically, without a per-write ask. `TICKETVOICE_NO_AUTOREWRITE` turns it off.
+
+## Fix two citecheck false positives found on real, live ticket bodies — 2026-09-05
+
+Both surfaced from a read-only audit of `aipotluck.org`'s cycle-3 tickets through the checks built
+earlier the same day, and one was independently confirmed live by that project's own session
+hitting the same bug class on a different ticket the same day:
+
+- **File:line citations resolved only by exact path.** CUR-886 cited `` `auth.ts:294-303` `` — the
+  real file is `web/src/lib/chat/server/auth.ts`, and citecheck flagged it as missing because it
+  only ever checked the literal path given. `judgeFileLines` now falls back to a `git ls-files`
+  basename search when the literal path misses, resolving a citation only when exactly one tracked
+  file matches that basename — an ambiguous match (2+ files sharing it) fails open rather than
+  guessing which one was meant.
+- **The SHA check's 7-40 hex-character range caught non-SHA hex ids.** CUR-855 cited three 24-hex
+  conversation ids that got misread as commit references. `judgeSHAs` now only treats a 40-char
+  (full) or 7-12-char (realistic abbreviation) hex string as a plausible SHA candidate — the 13-39
+  range is exactly where other systems' ids (24-char ObjectId-shaped, in this case) collide with the
+  old range, and nobody hand-abbreviates a commit to an odd length in that gap.
+
+**Known residual gap, not fixed here:** `aipotluck.org`'s own session hit a fresh case the length
+fix doesn't cover — a 12-character `agent-service` task id, which falls inside the plausible
+abbreviated-SHA range and still misreports as a nonexistent commit. Any short hex string is
+genuinely ambiguous between a git SHA and some other system's id; there's no clean length-based fix
+left for that case.
 
 ## Resolve TICKETVOICE_LINEAR_TOKEN from a config file, not just the env var — 2026-09-05
 

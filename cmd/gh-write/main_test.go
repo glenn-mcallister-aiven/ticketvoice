@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -157,6 +158,8 @@ func TestRunForwardsPositionalIDForCommentAndEdit(t *testing.T) {
 	}
 }
 
+// Derived, not a literal: `words(200)` was this fixture until 2026-09-14 and stopped being
+// over budget the moment IssueBudget reached 200.
 func words(n int) string { return strings.TrimSpace(strings.Repeat("word ", n)) }
 
 // The whole point of the backstop (see the package doc) is that it works no matter how the body
@@ -165,14 +168,14 @@ func TestRunRefusesOverBudgetBody(t *testing.T) {
 	noSiblings(t)
 	fakeGhOnPath(t)
 	var out, errb bytes.Buffer
-	code := run([]string{"issue", "create", "--title", "T"}, strings.NewReader(words(200)), &out, &errb)
+	code := run([]string{"issue", "create", "--title", "T"}, strings.NewReader(words(budgetgate.IssueBudget+50)), &out, &errb)
 	if code == 0 {
 		t.Fatalf("over-budget body must not exit 0")
 	}
 	if strings.Contains(out.String(), "ARGS:") {
 		t.Fatalf("gh must never be invoked for a refused body, got stdout %q", out.String())
 	}
-	if !strings.Contains(errb.String(), "200 words") {
+	if !strings.Contains(errb.String(), fmt.Sprintf("%d words", budgetgate.IssueBudget+50)) {
 		t.Fatalf("stderr must name the overage: %q", errb.String())
 	}
 }
@@ -206,5 +209,98 @@ func TestRunOmitsAgentTagWhenDisabled(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "STDIN:body text here") {
 		t.Fatalf("TICKETVOICE_NO_AGENT_TAG must suppress the tag: %q", out.String())
+	}
+}
+
+func TestRunReviewDefaultsToComment(t *testing.T) {
+	noSiblings(t)
+	fakeGhOnPath(t)
+	var out, errb bytes.Buffer
+	code := run([]string{"pr", "review", "5"}, strings.NewReader("one nit"), &out, &errb)
+	if code != 0 {
+		t.Fatalf("want exit 0, got %d stderr=%q", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "ARGS:pr review 5 --comment --body-file -") {
+		t.Fatalf("a review with no verdict must go out as --comment: %q", out.String())
+	}
+}
+
+func TestRunReviewKeepsItsVerdict(t *testing.T) {
+	noSiblings(t)
+	fakeGhOnPath(t)
+	var out, errb bytes.Buffer
+	code := run([]string{"pr", "review", "5", "--approve"}, strings.NewReader("ship it"), &out, &errb)
+	if code != 0 {
+		t.Fatalf("want exit 0, got %d stderr=%q", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "ARGS:pr review 5 --approve --body-file -") {
+		t.Fatalf("gh-write must forward --approve and add no second mode: %q", out.String())
+	}
+}
+
+func TestRunReviewIsHeldToTheCommentBudget(t *testing.T) {
+	noSiblings(t)
+	fakeGhOnPath(t)
+	var out, errb bytes.Buffer
+	code := run([]string{"pr", "review", "5"}, strings.NewReader(words(budgetgate.CommentBudget+10)), &out, &errb)
+	if code == 0 || strings.Contains(out.String(), "ARGS:") {
+		t.Fatalf("an over-budget review must be refused before gh runs, got code=%d stdout=%q", code, out.String())
+	}
+}
+
+func TestRunIssueReviewIsUnsupported(t *testing.T) {
+	var out, errb bytes.Buffer
+	code := run([]string{"issue", "review", "5"}, strings.NewReader(""), &out, &errb)
+	if code != 2 || !strings.Contains(errb.String(), "unsupported verb") {
+		t.Fatalf("want exit 2 for issue review, got code=%d stderr=%q", code, errb.String())
+	}
+}
+
+func TestRunCommentEditPatchesThroughTheAPI(t *testing.T) {
+	noSiblings(t)
+	fakeGhOnPath(t)
+	var out, errb bytes.Buffer
+	code := run([]string{"comment", "edit", "9", "--repo", "o/r"}, strings.NewReader("trimmed"), &out, &errb)
+	if code != 0 {
+		t.Fatalf("want exit 0, got %d stderr=%q", code, errb.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "ARGS:api -X PATCH repos/o/r/issues/comments/9 -F body=@-") {
+		t.Fatalf("comment edit must PATCH the comment with the body from stdin: %q", got)
+	}
+	if !strings.Contains(got, "STDIN:"+budgetgate.AgentTag+"trimmed") {
+		t.Fatalf("comment edit must tag and forward stdin: %q", got)
+	}
+}
+
+func TestRunCommentEditDefaultsToTheCurrentRepo(t *testing.T) {
+	noSiblings(t)
+	fakeGhOnPath(t)
+	var out, errb bytes.Buffer
+	if code := run([]string{"comment", "edit", "9"}, strings.NewReader("x"), &out, &errb); code != 0 {
+		t.Fatalf("want exit 0, got %d stderr=%q", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "repos/{owner}/{repo}/issues/comments/9") {
+		t.Fatalf("with no --repo, gh api's own placeholders must name the repo: %q", out.String())
+	}
+}
+
+func TestRunCommentEditNeedsAnID(t *testing.T) {
+	var out, errb bytes.Buffer
+	code := run([]string{"comment", "edit", "--repo", "o/r"}, strings.NewReader(""), &out, &errb)
+	if code != 2 || !strings.Contains(errb.String(), "usage:") {
+		t.Fatalf("want exit 2 and a usage message, got code=%d stderr=%q", code, errb.String())
+	}
+}
+
+func TestRunForwardsEditLast(t *testing.T) {
+	noSiblings(t)
+	fakeGhOnPath(t)
+	var out, errb bytes.Buffer
+	if code := run([]string{"issue", "comment", "3", "--edit-last"}, strings.NewReader("x"), &out, &errb); code != 0 {
+		t.Fatalf("want exit 0, got %d stderr=%q", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "ARGS:issue comment 3 --edit-last --body-file -") {
+		t.Fatalf("--edit-last must pass straight through: %q", out.String())
 	}
 }
