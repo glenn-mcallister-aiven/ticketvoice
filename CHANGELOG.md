@@ -1,5 +1,19 @@
 # Changelog
 
+## gh-write reads `--body-file` itself — 2026-10-01
+
+Every `gh-write` call from Claude Code ran sandboxed. The `gh-write *` sandbox exclusion matches a
+bare command, and a `<<` heredoc or `< file` redirect stops it matching — the same as `$(…)` and
+pipes. Tested with `gh pr list`: bare works; with `<<'EOF'` or `< /dev/null` the proxy denies
+`api.github.com`. gh-write took its body only on stdin, so no call could match.
+
+gh-write now takes `--body-file FILE`, `--body-file=FILE` and `-F FILE` itself instead of refusing
+them. It reads the file, runs the same gate, and passes the bytes to `gh` on stdin; `gh` never sees
+the path. The hook reads the path out of the command the way it reads `< file`. The flag was
+refused only because `gh` would read the file past the gate; that stops being true once gh-write
+reads it. `--body`/`-b` stay refused: an inline quoted body is what the hook can't parse. The raw
+`gh` deny now suggests `--body-file` rather than `< file`.
+
 ## Merge upstream v0.5.5 into the Jira branch — 2026-10-01
 
 Upstream's auto-rewrite and linear-strict were written against one prose field per call; this

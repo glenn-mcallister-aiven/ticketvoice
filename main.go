@@ -339,7 +339,7 @@ func findRedirectPath(rest string) (path string, ok bool) {
 }
 
 // ghWriteProse finds a gh-write invocation (see cmd/gh-write) in a Bash command string and
-// extracts the body that follows it — a heredoc, or a `< file` redirect — with the budget kind
+// extracts the body that follows it — a heredoc, a --body-file, or a `< file` redirect — with the budget kind
 // that applies. gh-write refuses --body/--body-file, so an inline body is never a quoted, escaped
 // argument: it's either literal heredoc text this can string-search for, or a plain file this can
 // read, both without a shell tokenizer. cwd resolves a relative redirect path; pass "" when it's
@@ -379,22 +379,44 @@ func ghWriteProse(command, cwd string) (text, kind string, budget int, ok bool) 
 		return text, kind, budget, true
 	}
 
-	if path, found := findRedirectPath(rest); found {
-		if !filepath.IsAbs(path) && cwd != "" {
-			path = filepath.Join(cwd, path)
-		}
-		fi, err := os.Stat(path)
-		if err != nil || fi.Size() > maxRedirectBytes {
-			return "", "", 0, false
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return "", "", 0, false
-		}
-		return string(data), kind, budget, true
+	// gh-write prefers --body-file over stdin, so the hook must too. `--body-file -` is stdin.
+	path, found := findBodyFile(rest)
+	if !found || path == "-" {
+		path, found = findRedirectPath(rest)
 	}
+	if !found {
+		return "", "", 0, false
+	}
+	if !filepath.IsAbs(path) && cwd != "" {
+		path = filepath.Join(cwd, path)
+	}
+	fi, err := os.Stat(path)
+	if err != nil || fi.Size() > maxRedirectBytes {
+		return "", "", 0, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", "", 0, false
+	}
+	return string(data), kind, budget, true
+}
 
-	return "", "", 0, false
+// bodyFileFlag matches gh-write's `--body-file FILE`, `--body-file=FILE` and `-F FILE`, with the
+// same literal-path alphabet as redirectPathByte. The trailing boundary keeps `tmp/$X` from
+// matching as `tmp/`.
+var bodyFileFlag = regexp.MustCompile(`(?:^|\s)(?:--body-file(?:=|[ \t]+)|-F[ \t]+)([A-Za-z0-9/._-]+)(?:\s|$)`)
+
+// findBodyFile looks for gh-write's --body-file flag in a gh-write invocation's tail. It only
+// looks at the invocation's own line: a later line is a different command.
+func findBodyFile(rest string) (path string, ok bool) {
+	if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+		rest = rest[:nl]
+	}
+	m := bodyFileFlag.FindStringSubmatch(rest)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
 }
 
 // extractProse dispatches on the calling tool, one tracker per branch: Linear's MCP tools carry a
@@ -1109,8 +1131,9 @@ func denyRawGhWrite(in hookInput) *hookOutput {
 	return &out
 }
 
-// rawGhDenyReason names the gh-write command that replaces w, with the redirect form first when the
-// body is already in a file, since ghWriteProse scores a `< path` redirect directly.
+// rawGhDenyReason names the gh-write command that replaces w, with the --body-file form first when
+// the body is already in a file. --body-file rather than `< path`: a redirect stops Claude Code's
+// sandbox exclusion matching gh-write, and the sandboxed call can't reach api.github.com.
 func rawGhDenyReason(w ghcmd.Write) string {
 	var head, cmd string
 	switch {
@@ -1133,9 +1156,9 @@ func rawGhDenyReason(w ghcmd.Write) string {
 	if file == "" || file == "-" {
 		file = w.Redirect
 	}
-	reason := head + " Use gh-write, which reads the body on stdin and runs the same budget and cope/basanite checks:\n\n"
+	reason := head + " Use gh-write, which reads the body from --body-file or stdin and runs the same budget and cope/basanite checks:\n\n"
 	if file != "" {
-		reason += "  " + cmd + " < " + file + "\n\nor with the text inline:\n\n"
+		reason += "  " + cmd + " --body-file " + file + "\n\nor with the text inline:\n\n"
 	}
 	reason += "  " + cmd + " <<'EOF'\n  ...\n  EOF\n\nMake that call now — asking the operator to post it by hand is the failure this reason exists to prevent."
 	return reason

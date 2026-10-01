@@ -1,6 +1,6 @@
 // Command gh-write wraps `gh issue`/`gh pr` writes, forcing body text through stdin (a
-// quoted heredoc, e.g. `gh-write issue create --title T <<'EOF' ... EOF`) instead of a
-// --body or --body-file flag. `pr review <id>` posts a review, and `comment edit <id>` edits an
+// quoted heredoc, e.g. `gh-write issue create --title T <<'EOF' ... EOF`) or a --body-file
+// gh-write reads itself, instead of a --body flag. `pr review <id>` posts a review, and `comment edit <id>` edits an
 // existing conversation comment through the REST API. Those are the two raw gh writes
 // ticketvoice's hook denies that had no gh-write form before.
 //
@@ -12,6 +12,13 @@
 // between two markers in that same string, which a plain string search finds without a
 // shell tokenizer. gh-write is what makes that convention the only way to write a body,
 // rather than a discipline someone has to remember on every call.
+//
+// --body-file (and -F) is taken by gh-write, never passed to gh: gh-write reads the file and gates
+// the bytes itself, and ticketvoice's hook reads the same path out of the command string the way
+// it reads a `< file` redirect, so both checks still see the body. It exists because Claude Code's
+// sandbox exclusion (`gh-write *` in sandbox.excludedCommands) stops matching once the command
+// carries any `<<` or `<` redirect, so a stdin-only body made every call from inside Claude Code
+// run sandboxed, where the proxy denies api.github.com. A file flag keeps the command bare.
 //
 // Everything gh-write doesn't recognize is passed straight through to gh, so `--repo`,
 // `--title`, `--label`, `--base`, `--draft`, and the rest work exactly as they do on gh
@@ -44,9 +51,42 @@ import (
 // validate checks the object/verb/flags shape and returns the gh args to run, or a usage error to
 // print instead. Split out of run so the exec/exit-code plumbing there isn't tangled up with
 // argument checking.
-func validate(args []string) (ghArgs []string, usageErr string) {
+func validate(args []string) (ghArgs []string, bodyPath, usageErr string) {
+	args, bodyPath, usageErr = takeBodyFile(args)
+	if usageErr != "" {
+		return nil, "", usageErr
+	}
+	ghArgs, usageErr = validateArgs(args)
+	return ghArgs, bodyPath, usageErr
+}
+
+// takeBodyFile removes `--body-file FILE`, `--body-file=FILE` and `-F FILE` from args, so gh never
+// reads the file unchecked. `-` means stdin, as it does on gh, and comes back as "".
+func takeBodyFile(args []string) (rest []string, bodyPath, usageErr string) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--body-file" || a == "-F":
+			if i+1 >= len(args) {
+				return nil, "", "gh-write: " + a + " needs a file"
+			}
+			bodyPath = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--body-file="):
+			bodyPath = strings.TrimPrefix(a, "--body-file=")
+		default:
+			rest = append(rest, a)
+		}
+	}
+	if bodyPath == "-" {
+		bodyPath = ""
+	}
+	return rest, bodyPath, ""
+}
+
+func validateArgs(args []string) (ghArgs []string, usageErr string) {
 	if len(args) < 2 {
-		return nil, "usage: gh-write <issue|pr> <create|comment|edit> [id] [gh flags...]\n       gh-write pr review <id> [--approve|--comment|--request-changes] [gh flags...]\n       gh-write comment edit <comment-id> [--repo owner/repo]"
+		return nil, "usage: gh-write <issue|pr> <create|comment|edit> [id] [gh flags...]\n       gh-write pr review <id> [--approve|--comment|--request-changes] [gh flags...]\n       gh-write comment edit <comment-id> [--repo owner/repo]\n       the body comes from stdin, or from --body-file FILE"
 	}
 	object, verb := args[0], args[1]
 	switch object {
@@ -63,7 +103,7 @@ func validate(args []string) (ghArgs []string, usageErr string) {
 	}
 	for _, a := range args[2:] {
 		if ghcmd.IsBodyFlag(a) {
-			return nil, fmt.Sprintf("gh-write: %s is not accepted — pipe or heredoc the body on stdin instead, so it lands in the Bash command text ticketvoice reads", a)
+			return nil, fmt.Sprintf("gh-write: %s is not accepted — pass --body-file FILE or the body on stdin instead, so it lands in the Bash command text ticketvoice reads", a)
 		}
 	}
 	switch {
@@ -174,15 +214,23 @@ func gateBody(object, verb, text string) (blocked bool, reason string) {
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	ghArgs, usageErr := validate(args)
+	ghArgs, bodyPath, usageErr := validate(args)
 	if usageErr != "" {
 		fmt.Fprintln(stderr, usageErr)
 		return 2
 	}
 
-	body, err := io.ReadAll(stdin)
+	// With --body-file, stdin is ignored rather than refused: a caller's stdin may be a terminal
+	// or /dev/null, and neither carries a body.
+	var body []byte
+	var err error
+	if bodyPath != "" {
+		body, err = os.ReadFile(bodyPath)
+	} else {
+		body, err = io.ReadAll(stdin)
+	}
 	if err != nil {
-		fmt.Fprintln(stderr, "gh-write: reading stdin:", err)
+		fmt.Fprintln(stderr, "gh-write: reading body:", err)
 		return 1
 	}
 	text := string(body)

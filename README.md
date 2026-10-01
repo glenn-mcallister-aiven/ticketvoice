@@ -92,7 +92,7 @@ hook process has no memory of its own between calls:
 Being over budget is exempt from all of this: it always denies, at any attempt count, since it's
 meant to be a hard limit, not a register a rewrite can talk its way past.
 
-gh-write's own backstop (below) never gets this: it only ever sees the body on its stdin, never a
+gh-write's own backstop (below) never gets this: it only ever sees the body, never a
 session id, so it has nothing to key a retry sequence on — every gh-write refusal stays attempt 1.
 
 `TICKETVOICE_STATE_DIR` overrides where the attempt state lives; see
@@ -266,8 +266,8 @@ for the cost.
 
 ## gh-write: GitHub issues and PRs
 
-`gh-write` is a companion binary this repo also builds — `gh issue`/`gh pr`, but the body always
-comes from stdin instead of a `--body`/`--body-file` flag:
+`gh-write` is a companion binary this repo also builds — `gh issue`/`gh pr`, but the body comes
+from stdin or a `--body-file` gh-write reads itself, never an inline `--body`:
 
 ```bash
 gh-write issue create --title "Bug: X" --repo you/repo <<'EOF'
@@ -285,6 +285,8 @@ EOF
 gh-write comment edit 2918375521 --repo you/repo <<'EOF'
 The trimmed comment.
 EOF
+
+gh-write pr create --base main --title "Fix X" --body-file tmp/pr-body.md
 ```
 
 `pr review` with no `--approve`, `--comment` or `--request-changes` goes out as `--comment`. `comment
@@ -292,16 +294,21 @@ edit` rewrites one existing issue or PR conversation comment by its id, through 
 your own last comment, `gh-write issue comment 42 --edit-last` also works.
 
 Everything gh-write doesn't recognize (`--repo`, `--label`, `--base`, `--draft`, ...) passes
-straight through to `gh`, unchanged. `--body`, `-b`, `--body-file`, `-F`, and their `=value` forms
-are refused outright, so a body can only arrive on stdin — as a heredoc, a `< file` redirect, or a
-pipe.
+straight through to `gh`, unchanged. `--body`, `-b` and `--body=` are refused outright.
+`--body-file FILE`, `--body-file=FILE` and `-F FILE` are taken by gh-write, not passed to `gh`:
+gh-write reads the file, checks it, and hands `gh` the bytes on stdin. `--body-file -` means stdin,
+as on `gh`. Otherwise the body arrives on stdin — a heredoc, a `< file` redirect, or a pipe.
+
+Prefer `--body-file` from inside Claude Code. Its sandbox exclusion for `gh-write` matches on a bare
+command, and any `<<` or `<` redirect stops it matching: the call then runs sandboxed, where the
+proxy denies `api.github.com`.
 
 Every body gh-write sends is also prefixed with an agent tag — see [Agent tag](#agent-tag).
 
 **A raw `gh` write is denied.** `gh issue|pr create|comment|edit` or `gh pr review` with `--body`,
 `-b`, `--body-file` or `-F`, and `gh api` with a `body=` field, are refused at the hook with the
-`gh-write` command that carries the same body — `gh-write pr comment 1568 < comment.md` for a
-`--body-file`. The flag's presence decides it; the body is never parsed. Only a `gh` in command
+`gh-write` command that carries the same body — `gh-write pr comment 1568 --body-file comment.md`
+for a `--body-file`. The flag's presence decides it; the body is never parsed. Only a `gh` in command
 position counts, so a commit message or heredoc that mentions one is left alone. If `gh-write`
 isn't on `PATH` the hook lets the call through, since there'd be nothing to point at. Not covered:
 `gh release --notes`, `gh gist`, and a `gh` call hidden behind `bash -c`, `eval` or a script file.
@@ -320,7 +327,7 @@ gate at all.
 
 gh-write turns that into a much narrower problem: it owns a single, fixed CLI grammar, so the
 only thing ticketvoice has to find is a `gh-write` call in command position followed by a
-heredoc or a `< file` redirect — both literal text, no shell escaping to resolve, extractable
+heredoc, a `--body-file` path or a `< file` redirect — all literal text, no shell escaping to resolve, extractable
 without a tokenizer (`ghWriteProse` in `main.go`). Covers issue and PR create/comment/edit, PR
 reviews and comment edits,
 matching the Linear surface this hook already covers (issues and comments) — not release notes,

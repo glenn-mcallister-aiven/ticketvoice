@@ -88,10 +88,10 @@ func TestRunRejectsUnsupportedVerb(t *testing.T) {
 	}
 }
 
-// The whole point of gh-write is that a body never reaches it as a flag — see the package
-// doc. --body, -b, --body-file, -F and their --flag=value forms must all be refused.
+// An inline body is shell-quoted text the hook can't read back out of the command — see the
+// package doc. --body, -b and --body= must all be refused.
 func TestRunRejectsBodyFlags(t *testing.T) {
-	for _, flag := range []string{"--body", "-b", "--body-file", "-F", "--body=hi", "--body-file=notes.md"} {
+	for _, flag := range []string{"--body", "-b", "--body=hi"} {
 		t.Run(flag, func(t *testing.T) {
 			var out, errb bytes.Buffer
 			code := run([]string{"issue", "create", "--title", "T", flag, "x"}, strings.NewReader(""), &out, &errb)
@@ -142,6 +142,70 @@ func TestRunForwardsFlagsAndStdinToGh(t *testing.T) {
 	}
 	if !strings.Contains(got, "STDIN:"+budgetgate.AgentTag+"body text here") {
 		t.Fatalf("gh-write did not tag and forward stdin: %q", got)
+	}
+}
+
+// gh-write takes --body-file itself: the file's bytes go to gh on stdin, the path does not.
+func TestRunReadsBodyFile(t *testing.T) {
+	noSiblings(t)
+	fakeGhOnPath(t)
+	path := filepath.Join(t.TempDir(), "body.md")
+	if err := os.WriteFile(path, []byte("from a file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"pr", "create", "--title", "T", "--body-file", path},
+		{"pr", "create", "--body-file=" + path, "--title", "T"},
+		{"pr", "create", "-F", path, "--title", "T"},
+	} {
+		var out, errb bytes.Buffer
+		if code := run(args, strings.NewReader("ignored stdin"), &out, &errb); code != 0 {
+			t.Fatalf("%v: want exit 0, got %d stderr=%q", args, code, errb.String())
+		}
+		got := out.String()
+		if !strings.Contains(got, "ARGS:pr create --title T --body-file -\n") || strings.Contains(got, path) {
+			t.Fatalf("%v: the path must not reach gh: %q", args, got)
+		}
+		if !strings.Contains(got, "STDIN:"+budgetgate.AgentTag+"from a file") {
+			t.Fatalf("%v: want the file's bytes on gh's stdin: %q", args, got)
+		}
+	}
+}
+
+// The gate runs on a --body-file body the same as on stdin.
+func TestRunGatesBodyFile(t *testing.T) {
+	noSiblings(t)
+	fakeGhOnPath(t)
+	path := filepath.Join(t.TempDir(), "body.md")
+	if err := os.WriteFile(path, []byte(words(budgetgate.IssueBudget+1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	if code := run([]string{"issue", "create", "--title", "T", "--body-file", path}, strings.NewReader(""), &out, &errb); code != 1 || strings.Contains(out.String(), "ARGS:") {
+		t.Fatalf("want exit 1 with gh never called, got code=%d out=%q", code, out.String())
+	}
+}
+
+// `--body-file -` is stdin, as on gh.
+func TestRunBodyFileDashReadsStdin(t *testing.T) {
+	noSiblings(t)
+	fakeGhOnPath(t)
+	var out, errb bytes.Buffer
+	if code := run([]string{"pr", "comment", "3", "--body-file", "-"}, strings.NewReader("on stdin"), &out, &errb); code != 0 {
+		t.Fatalf("want exit 0, got %d stderr=%q", code, errb.String())
+	}
+	if got := out.String(); !strings.Contains(got, "ARGS:pr comment 3 --body-file -\n") || !strings.Contains(got, "STDIN:"+budgetgate.AgentTag+"on stdin") {
+		t.Fatalf("want stdin forwarded once: %q", got)
+	}
+}
+
+func TestRunBodyFileErrors(t *testing.T) {
+	var out, errb bytes.Buffer
+	if code := run([]string{"issue", "create", "--body-file"}, strings.NewReader(""), &out, &errb); code != 2 {
+		t.Errorf("--body-file with no file: want exit 2, got %d", code)
+	}
+	if code := run([]string{"issue", "create", "--body-file", filepath.Join(t.TempDir(), "nope")}, strings.NewReader(""), &out, &errb); code != 1 {
+		t.Errorf("missing file: want exit 1, got %d", code)
 	}
 }
 

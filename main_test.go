@@ -200,9 +200,8 @@ func TestGhWriteProseExtractsHeredocBody(t *testing.T) {
 	}
 }
 
-// gh-write's own validate() refuses --body-file, but not a `< file` redirect — that form is a
-// plain file read, not the shell-quoted flag validate() blocks, so it's this function's job to
-// find it.
+// A `< file` redirect is a plain file read, not the shell-quoted --body flag gh-write's validate()
+// blocks, so it's this function's job to find it.
 func TestGhWriteProseReadsRedirectFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "body.txt")
@@ -246,7 +245,29 @@ func TestGhWriteProseReadsRedirectFile(t *testing.T) {
 	})
 }
 
-// The --body-file rejection is gh-write's job (cmd/gh-write); this only has to confirm that a
+// --body-file is how a body reaches gh-write without a redirect, which would stop Claude Code's
+// sandbox exclusion matching. The hook must score it the way it scores `< file`.
+func TestGhWriteProseReadsBodyFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "body.md"), []byte("hello there"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{
+		"gh-write pr create --base main --title T --body-file body.md",
+		"gh-write pr comment 7 --body-file=body.md --repo o/r",
+		"gh-write issue comment 7 -F body.md",
+		"gh-write issue comment 7 --body-file - < body.md",
+	} {
+		if text, _, _, ok := ghWriteProse(command, dir); !ok || text != "hello there" {
+			t.Errorf("%q: want (%q, true), got (%q, %v)", command, "hello there", text, ok)
+		}
+	}
+	if _, _, _, ok := ghWriteProse("gh-write issue create --body-file tmp/$X", dir); ok {
+		t.Error("a --body-file with shell expansion must not be read literally")
+	}
+}
+
+// The --body rejection is gh-write's job (cmd/gh-write); this only has to confirm that a
 // Bash command carrying one instead of a heredoc is *ignored*, not misread as an empty body that
 // would pass every budget silently.
 func TestExtractProseIgnoresNonGhWriteBash(t *testing.T) {
@@ -1360,10 +1381,10 @@ func TestRunHookDeniesRawGhBodyWrites(t *testing.T) {
 	clean(t)
 	stubGhWrite(t)
 	for _, tc := range []struct{ command, want string }{
-		{"gh pr comment 1568 --body-file /abs/path/comment.md", "gh-write pr comment 1568 < /abs/path/comment.md"},
+		{"gh pr comment 1568 --body-file /abs/path/comment.md", "gh-write pr comment 1568 --body-file /abs/path/comment.md"},
 		{`gh pr comment 1568 --body "$(cat /abs/path/comment.md)"`, "gh-write pr comment 1568 <<'EOF'"},
-		{"gh issue comment 3 -F notes.md --repo o/r", "gh-write issue comment 3 --repo o/r < notes.md"},
-		{"gh pr comment 1 --body-file - < x.md", "gh-write pr comment 1 < x.md"},
+		{"gh issue comment 3 -F notes.md --repo o/r", "gh-write issue comment 3 --repo o/r --body-file notes.md"},
+		{"gh pr comment 1 --body-file - < x.md", "gh-write pr comment 1 --body-file x.md"},
 		{`gh pr review 5 --approve -b "looks good"`, "gh-write pr review 5 --approve <<'EOF'"},
 		{"gh api -X PATCH repos/o/r/issues/comments/9 -f body=trimmed", "gh-write comment edit 9"},
 	} {
