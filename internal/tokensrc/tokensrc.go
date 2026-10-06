@@ -2,8 +2,7 @@
 // var first, then a .env file found by walking up from cwd, then a global
 // ~/.config/ticketvoice/.env — the global fallback is what lets a hook wired into every project's
 // settings.json resolve a credential regardless of which project's cwd it's currently handling a
-// call for. Extracted out of internal/linearclient once a second caller (internal/autorewrite)
-// needed the identical chain for a different env var name.
+// call for. Extracted out of internal/linearclient for a second caller, since removed.
 package tokensrc
 
 import (

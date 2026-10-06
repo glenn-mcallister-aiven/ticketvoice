@@ -11,14 +11,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"regexp"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/justinstimatze/ticketvoice/internal/attemptstate"
-	"github.com/justinstimatze/ticketvoice/internal/autorewrite"
 	"github.com/justinstimatze/ticketvoice/internal/budgetgate"
 	"github.com/justinstimatze/ticketvoice/internal/citecheck"
 	"github.com/justinstimatze/ticketvoice/internal/linearclient"
@@ -174,9 +171,8 @@ func (u strictUnit) siblingPayload() []byte {
 }
 
 type strictVerdict struct {
-	deny       string
-	suggestion string
-	note       string
+	deny string
+	note string
 }
 
 // A list section skips cope and basanite. Both read paragraphs, and on evidence lines they join one
@@ -198,9 +194,8 @@ func judgeAll(u strictUnit, text, cwd string, linear *linearclient.Client) (cope
 }
 
 // judgeStrictUnit runs one unit through the same checks and retry rules as a whole body: over
-// budget or a bad citation always denies; a cope or basanite hit is denied with a rewrite attached
-// when one comes back clean, and lets the write through with a note on the third attempt that
-// shrinks nothing.
+// budget or a bad citation always denies; a cope or basanite hit denies, and lets the write through
+// with a note on the third attempt that shrinks nothing.
 // commentAdvisoryRules are cope rules that warn on a strict comment instead of refusing it. A
 // strict comment reports evidence, and "X happened, but Y has not" is often the whole finding: on
 // the canary, clause_symmetry refused such a sentence twice and the agent cut a fact to get past it
@@ -226,7 +221,7 @@ func advisoryOnly(u strictUnit, cope budgetgate.Judgment) (budgetgate.Judgment, 
 		"If the hit is right, edit the comment rather than reposting it.\n\n" + cope.Note
 }
 
-func judgeStrictUnit(in hookInput, anchor string, u strictUnit, linear *linearclient.Client, rewriter *autorewrite.Client) strictVerdict {
+func judgeStrictUnit(in hookInput, anchor string, u strictUnit, linear *linearclient.Client) strictVerdict {
 	over, budgetReason := u.evaluate()
 	cope, basanite, citations, citeIDs := judgeAll(u, u.text, in.Cwd, linear)
 	var advisory string
@@ -235,15 +230,6 @@ func judgeStrictUnit(in hookInput, anchor string, u strictUnit, linear *linearcl
 	if !over && !cope.Flagged && !basanite.Flagged && !citations.Flagged {
 		attemptstate.Clear(key)
 		return strictVerdict{note: advisory}
-	}
-
-	// List sections are left to the author: a rewrite of a dated evidence line can break the
-	// format the server enforces, or quietly change what was observed.
-	if rewriter != nil && !u.rule.lines && !citations.Flagged {
-		if candidate, ok := strictRewrite(in.Cwd, u, over, budgetReason, cope, basanite, linear, rewriter); ok {
-			attemptstate.Clear(key)
-			return strictVerdict{suggestion: candidate}
-		}
 	}
 
 	ids := budgetgate.AllViolationIDs(
@@ -278,42 +264,10 @@ func judgeStrictUnit(in hookInput, anchor string, u strictUnit, linear *linearcl
 	return strictVerdict{deny: reason}
 }
 
-func strictRewrite(cwd string, u strictUnit, over bool, budgetReason string, cope, basanite budgetgate.Judgment,
-	linear *linearclient.Client, rewriter *autorewrite.Client) (string, bool) {
-	var violations []string
-	if over {
-		violations = append(violations, budgetReason)
-	}
-	if cope.Flagged {
-		violations = append(violations, cope.Note)
-	}
-	if basanite.Flagged {
-		violations = append(violations, basanite.Note)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	candidate, err := rewriter.Rewrite(ctx, u.label+" of a Linear ticket", u.text, violations)
-	if err != nil {
-		return "", false
-	}
-	// The server heads what it writes itself; a tag inside a section would sit in the ticket text.
-	candidate = strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(candidate), agentTagRune))
-	if candidate == "" || !sameEvidence(u.text, candidate) {
-		return "", false
-	}
-	if newOver, _ := (strictUnit{text: candidate, label: u.label, rule: u.rule, budget: u.budget}).evaluate(); newOver {
-		return "", false
-	}
-	newCope, newBasanite, newCitations, _ := judgeAll(u, candidate, cwd, linear)
-	if newCope.Flagged || newBasanite.Flagged || newCitations.Flagged {
-		return "", false
-	}
-	return candidate, true
-}
-
 // runStrict judges every unit in a strict call on its own. Any deny refuses the call, naming each
-// unit that failed, and a unit with a clean rewrite is denied with that rewrite attached for its
-// author to send or revise.
+// unit that failed. Nothing here writes prose for the author: a model rewrite saw only the one
+// section, and a quarter of the 450 it saved between 2026-09-24 and 2026-10-06 changed what the
+// section claimed while every SHA and id survived.
 func runStrict(in hookInput, field string) *hookOutput {
 	var input map[string]any
 	if json.Unmarshal(in.ToolInput, &input) != nil {
@@ -324,20 +278,14 @@ func runStrict(in hookInput, field string) *hookOutput {
 		return nil
 	}
 	linear, _ := linearclient.New(in.Cwd)
-	var rewriter *autorewrite.Client
-	if os.Getenv("TICKETVOICE_NO_AUTOREWRITE") == "" {
-		rewriter, _ = autorewrite.New(in.Cwd)
-	}
 	anchor, _ := input["issue"].(string)
 
 	var denies, notes []string
 	for _, u := range units {
-		v := judgeStrictUnit(in, anchor, u, linear, rewriter)
+		v := judgeStrictUnit(in, anchor, u, linear)
 		switch {
 		case v.deny != "":
 			denies = append(denies, fmt.Sprintf("[%s] %s", u.label, v.deny))
-		case v.suggestion != "":
-			denies = append(denies, fmt.Sprintf("[%s] %s", u.label, suggestionReason(v.suggestion)))
 		case v.note != "":
 			notes = append(notes, v.note)
 		}

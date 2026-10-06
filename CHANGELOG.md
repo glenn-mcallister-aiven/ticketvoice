@@ -1,5 +1,16 @@
 # Changelog
 
+## No model writes prose for the author — 2026-10-06
+
+Auto-rewrite is gone, and `internal/autorewrite` with it. A flagged write is denied with its
+reason, and nothing replaces or is offered in place of the author's text. The rewriter saw one
+section or comment at a time; of 450 rewrites recorded from 2026-09-24 to 2026-10-06, 112 changed
+what the text claimed and 25 now say something false or the opposite (CUR-1957: "doesn't measure
+#1838 on its own" became "isolates #1838 from the planner"). Offering the rewrite with the deny,
+tried the same night, still leaves an agent free to resend it unread. `ANTHROPIC_API_KEY`,
+`TICKETVOICE_REWRITE_MODEL`, `TICKETVOICE_ANTHROPIC_ENDPOINT` and `TICKETVOICE_NO_AUTOREWRITE` are
+no longer read.
+
 ## A raw `gh` write is denied and pointed at gh-write — 2026-09-29
 
 A 318-word `gh pr comment 1568 --body-file <path>` went out with no check on 2026-09-28: the hook

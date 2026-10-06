@@ -19,16 +19,6 @@ func words(n int) string { return strings.TrimSpace(strings.Repeat("word ", n)) 
 // over-budget fixtures silently became under-budget ones when IssueBudget moved 150 -> 200.
 var overBudgetWords = defaultIssueBudget + 50
 
-// cleanRewrittenText is words(n) plus an impact line, for a fake autorewrite server's response —
-// unlike cleanIssueBody (below), which embeds a literal backslash-n pair meant to be spliced raw
-// into hand-built JSON text, this uses a real newline byte, because it goes through json.Marshal
-// in fakeAutorewriteServer: marshaling a real newline correctly round-trips as JSON's own \n
-// escape, but marshaling cleanIssueBody's already-literal "\n" text would double-escape it into
-// four bytes that never decode back to a real newline.
-func cleanRewrittenText(n int) string {
-	return words(n) + "\n\nImpact: none - test fixture."
-}
-
 // cleanIssueBody is words(n) plus an impact line — the impactline check only applies to an issue
 // description, so any fixture meant to read as fully clean needs this, not just an under-budget,
 // unflagged word count.
@@ -653,236 +643,39 @@ func TestRunHookDoesNotConflateDifferentTicketsInOneSession(t *testing.T) {
 	}
 }
 
-// isolateAutorewriteEnv points ANTHROPIC_API_KEY at a fixed test value and HOME at an empty temp
-// dir, so a test asserting autorewrite behavior isn't silently affected by whatever this
-// developer's actual ~/.config/ticketvoice/.env happens to contain (it now holds a real key).
-func isolateAutorewriteEnv(t *testing.T) {
+// isolateModelEnv makes a model call possible if the hook ever tries one: a key resolves and every
+// request lands on a counting server.
+func isolateModelEnv(t *testing.T) *int32 {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-}
-
-// fakeAutorewriteServer answers every request with a forced tool_use response carrying rewritten
-// as the "rewritten" field, and counts how many requests it received — so a test can assert
-// autorewrite was never attempted at all, not just that its result didn't change the outcome.
-func fakeAutorewriteServer(t *testing.T, rewritten string) (url string, calls *int32) {
-	t.Helper()
-	calls = new(int32)
-	input, _ := json.Marshal(map[string]string{"rewritten": rewritten})
-	body, _ := json.Marshal(map[string]any{
-		"content": []map[string]any{
-			{"type": "tool_use", "name": "rewrite", "input": json.RawMessage(input)},
-		},
-	})
+	calls := new(int32)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(calls, 1)
-		w.Write(body)
 	}))
 	t.Cleanup(srv.Close)
 	t.Setenv("TICKETVOICE_ANTHROPIC_ENDPOINT", srv.URL)
-	return srv.URL, calls
+	return calls
 }
 
-// A clean rewrite is handed back to its author, never saved in the author's place: the rewriting
-// model sees only the draft, and on CUR-1957 (2026-10-06) a stored voice fix turned "doesn't
-// measure #1838 on its own" into "isolates #1838 from the planner" with every id intact.
-func TestRunHookCleanRewriteIsSuggestedNeverStored(t *testing.T) {
+// A flagged write is refused with the reason and nothing else: no model writes prose for the
+// author, offered or stored. A rewriter that saw one section at a time changed what 112 of 450
+// saved sections and comments claimed (2026-09-24 to 2026-10-06), CUR-1957's "doesn't measure
+// #1838 on its own" stored as "isolates #1838 from the planner".
+func TestRunHookFlaggedWriteGetsNoModelProse(t *testing.T) {
 	clean(t)
 	freshState(t)
-	isolateAutorewriteEnv(t)
-	_, calls := fakeAutorewriteServer(t, cleanRewrittenText(20))
-
+	calls := isolateModelEnv(t)
 	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + cleanIssueBody(200) + `"}}`)
 	out := runHookWithInput(raw)
 	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
-		t.Fatalf("a flagged write must be refused even when a clean rewrite exists, got %+v", out)
+		t.Fatalf("an over-budget write must be refused, got %+v", out)
 	}
 	if out.HookSpecificOutput.UpdatedInput != nil {
-		t.Fatalf("the rewrite must never be stored in the author's place, got %s", out.HookSpecificOutput.UpdatedInput)
-	}
-	if reason := out.HookSpecificOutput.PermissionDecisionReason; !strings.Contains(reason, cleanRewrittenText(20)) {
-		t.Fatalf("the refusal must carry the rewrite for the author to send or revise, got %q", reason)
-	}
-	if *calls != 1 {
-		t.Fatalf("want exactly one rewrite call, got %d", *calls)
-	}
-
-	// Sent back as-is, the suggestion passes.
-	resend := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + cleanRewrittenText(20) + `"}}`)
-	if again := runHookWithInput(resend); again != nil && again.HookSpecificOutput.PermissionDecision == "deny" {
-		t.Fatalf("the suggested text must pass when the author sends it, got %+v", again)
-	}
-}
-
-// A rewrite that introduces a citation the author never wrote is a different ticket: it must fall
-// through to the ordinary deny, never be stored. 22 Sep 2026: a stored rewrite of CUR-1689 came
-// back with an invented go-red criterion and bare ticket ids.
-func TestRunHookAutoRewriteRejectsACandidateThatInventsEvidence(t *testing.T) {
-	clean(t)
-	freshState(t)
-	isolateAutorewriteEnv(t)
-	fakeAutorewriteServer(t, cleanRewrittenText(20)+" See CUR-9999.")
-
-	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + cleanIssueBody(200) + `"}}`)
-	out := runHookWithInput(raw)
-	if out != nil && out.HookSpecificOutput.PermissionDecision == "allow" && out.HookSpecificOutput.UpdatedInput != nil {
-		t.Fatalf("a rewrite that adds CUR-9999 must not be stored, got %+v", out)
-	}
-}
-
-func TestSameEvidenceNamesTheContract(t *testing.T) {
-	orig := "Broke in 0fe9cfbe9c, see `a.ts:12`, #1258 and https://x.y/z (CUR-12)."
-	cases := []struct {
-		name string
-		cand string
-		want bool
-	}{
-		{"shorter prose, every citation kept", "Broke in 0fe9cfbe9c: `a.ts:12`, #1258, https://x.y/z, CUR-12.", true},
-		{"a dropped SHA is lost evidence", "Broke: `a.ts:12`, #1258, https://x.y/z, CUR-12.", false},
-		{"a dropped URL is lost evidence", "Broke in 0fe9cfbe9c: `a.ts:12`, #1258, CUR-12.", false},
-		{"an added ticket id is invented evidence", "Broke in 0fe9cfbe9c: `a.ts:12`, #1258, https://x.y/z, CUR-12, CUR-13.", false},
-	}
-	for _, c := range cases {
-		if got := sameEvidence(orig, c.cand); got != c.want {
-			t.Errorf("%s: sameEvidence = %v, want %v", c.name, got, c.want)
-		}
-	}
-}
-
-// The rewrite endpoint answers, but cope still flags the candidate on re-validation (cope-gate is
-// stubbed to always flag here) — this must fall through to today's exact deny behavior, byte-
-// identical to a TICKETVOICE_NO_AUTOREWRITE=1 run of the same input.
-func TestRunHookAutoRewriteFallsThroughToDenyWhenCandidateStillFlagged(t *testing.T) {
-	body := func() []byte {
-		return []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + cleanIssueBody(20) + `"}}`)
-	}
-	stubCope := func(t *testing.T) {
-		t.Setenv("TICKETVOICE_COPE_GATE", fakeSiblingBinary(t, "cope-gate", "dangling_end: 1 violation(s)"))
-		t.Setenv("TICKETVOICE_BASANITE", fakeSiblingBinary(t, "basanite", ""))
-	}
-
-	t.Run("with autorewrite", func(t *testing.T) {
-		freshState(t)
-		isolateAutorewriteEnv(t)
-		stubCope(t)
-		fakeAutorewriteServer(t, "still bad text")
-		out := runHookWithInput(body())
-		if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
-			t.Fatalf("a candidate that still fails re-validation must fall through to deny, got %+v", out)
-		}
-		if !strings.Contains(out.HookSpecificOutput.PermissionDecisionReason, "dangling_end") {
-			t.Fatalf("the deny reason must name the ORIGINAL text's violation, got %q", out.HookSpecificOutput.PermissionDecisionReason)
-		}
-	})
-
-	t.Run("with TICKETVOICE_NO_AUTOREWRITE baseline", func(t *testing.T) {
-		freshState(t)
-		t.Setenv("TICKETVOICE_NO_AUTOREWRITE", "1")
-		stubCope(t)
-		out := runHookWithInput(body())
-		if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
-			t.Fatalf("baseline must deny too, got %+v", out)
-		}
-		if !strings.Contains(out.HookSpecificOutput.PermissionDecisionReason, "dangling_end") {
-			t.Fatalf("baseline reason must name the same violation, got %q", out.HookSpecificOutput.PermissionDecisionReason)
-		}
-	})
-}
-
-func TestRunHookAutoRewriteNeverAttemptedWhenCitationsFlagged(t *testing.T) {
-	clean(t)
-	freshState(t)
-	isolateAutorewriteEnv(t)
-	_, calls := fakeAutorewriteServer(t, cleanRewrittenText(20))
-	t.Setenv("TICKETVOICE_LINEAR_TOKEN", "") // no Linear client → citations can't be the trigger here,
-	// so force it via a SHA citation against a real repo instead.
-
-	desc := words(overBudgetWords) + " `deadbeef1234`" // a backtick-fenced bogus SHA, confirmed-flagged since cwd is a real repo below
-	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + desc + `"},"cwd":"` + mustGitRepo(t) + `"}`)
-	out := runHookWithInput(raw)
-	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
-		t.Fatalf("a citations-flagged write must still deny, got %+v", out)
+		t.Fatalf("a refused write must carry no replacement text, got %s", out.HookSpecificOutput.UpdatedInput)
 	}
 	if *calls != 0 {
-		t.Fatalf("citations-flagged writes must never attempt a rewrite, got %d calls", *calls)
-	}
-}
-
-func TestRunHookAutoRewriteNeverAttemptedWhenImpactFlagged(t *testing.T) {
-	clean(t)
-	freshState(t)
-	isolateAutorewriteEnv(t)
-	_, calls := fakeAutorewriteServer(t, cleanRewrittenText(20))
-
-	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + words(overBudgetWords) + `"}}`) // over budget, no Impact: line
-	out := runHookWithInput(raw)
-	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
-		t.Fatalf("a missing-impact-line write must still deny, got %+v", out)
-	}
-	if *calls != 0 {
-		t.Fatalf("impact-flagged writes must never attempt a rewrite, got %d calls", *calls)
-	}
-}
-
-func TestRunHookAutoRewriteNeverAttemptedForBashCalls(t *testing.T) {
-	clean(t)
-	freshState(t)
-	isolateAutorewriteEnv(t)
-	_, calls := fakeAutorewriteServer(t, "irrelevant")
-
-	raw := []byte(`{"tool_name":"Bash","tool_input":{"command":"gh-write issue create --title T <<'EOF'\n` + words(overBudgetWords) + `\nEOF\n"}}`)
-	runHookWithInput(raw)
-	if *calls != 0 {
-		t.Fatalf("a Bash/gh-write call must never attempt a rewrite (no field to apply it to), got %d calls", *calls)
-	}
-}
-
-func TestRunHookAutoRewriteNeverAttemptedForAPatch(t *testing.T) {
-	clean(t)
-	freshState(t)
-	isolateAutorewriteEnv(t)
-	_, calls := fakeAutorewriteServer(t, "irrelevant")
-
-	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"id":"ABC-1","patch":[{"op":"append","text":"` + words(overBudgetWords) + `"}]}}`)
-	runHookWithInput(raw)
-	if *calls != 0 {
-		t.Fatalf("a patch call must never attempt a rewrite, got %d calls", *calls)
-	}
-}
-
-func TestRunHookAutoRewriteSkippedWithNoKeyResolvable(t *testing.T) {
-	clean(t)
-	freshState(t)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("ANTHROPIC_API_KEY", "")
-	_, calls := fakeAutorewriteServer(t, "irrelevant")
-	t.Setenv("TICKETVOICE_COPE_GATE", fakeSiblingBinary(t, "cope-gate", "dangling_end: 1 violation(s)"))
-
-	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + cleanIssueBody(20) + `"}}`)
-	out := runHookWithInput(raw)
-	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
-		t.Fatalf("with no key resolvable, must fall through to deny cleanly, got %+v", out)
-	}
-	if *calls != 0 {
-		t.Fatalf("with no key resolvable, no network call may be attempted, got %d calls", *calls)
-	}
-}
-
-func TestRunHookAutoRewriteDisabledByEnvVar(t *testing.T) {
-	clean(t)
-	freshState(t)
-	isolateAutorewriteEnv(t)
-	t.Setenv("TICKETVOICE_NO_AUTOREWRITE", "1")
-	_, calls := fakeAutorewriteServer(t, cleanRewrittenText(20))
-	t.Setenv("TICKETVOICE_COPE_GATE", fakeSiblingBinary(t, "cope-gate", "dangling_end: 1 violation(s)"))
-
-	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + cleanIssueBody(20) + `"}}`)
-	out := runHookWithInput(raw)
-	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
-		t.Fatalf("with autorewrite disabled, must deny as if it didn't exist, got %+v", out)
-	}
-	if *calls != 0 {
-		t.Fatalf("TICKETVOICE_NO_AUTOREWRITE must skip resolving a client at all, got %d calls", *calls)
+		t.Fatalf("no model call may be made for a flagged write, got %d", *calls)
 	}
 }
 

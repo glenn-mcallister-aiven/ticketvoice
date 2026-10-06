@@ -149,12 +149,10 @@ func TestStrictSiblingFlagNamesTheSection(t *testing.T) {
 	}
 }
 
-// A clean rewrite of one section is handed back in the refusal, named by its section, and nothing
-// is stored: the author decides whether it still says what they meant.
-func TestStrictRewriteIsSuggestedNotStored(t *testing.T) {
+// A flagged section is refused by name, with nothing written in its place and no model call.
+func TestStrictFlaggedSectionGetsNoModelProse(t *testing.T) {
 	strictEnv(t)
-	isolateAutorewriteEnv(t)
-	_, calls := fakeAutorewriteServer(t, "🤖 "+words(40))
+	calls := isolateModelEnv(t)
 	out := strictCall(t, "mcp__linear-strict__set_state", map[string]any{
 		"issue": "ENG-1", "patch": []any{
 			map[string]any{"section": "Observed", "mode": "append", "body": observedLine(10)},
@@ -162,17 +160,16 @@ func TestStrictRewriteIsSuggestedNotStored(t *testing.T) {
 		},
 	})
 	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
-		t.Fatalf("a flagged section must be refused even with a clean rewrite, got %+v", out)
+		t.Fatalf("an over-budget section must be refused, got %+v", out)
 	}
 	if out.HookSpecificOutput.UpdatedInput != nil {
-		t.Fatalf("the rewrite must never be stored, got %s", out.HookSpecificOutput.UpdatedInput)
+		t.Fatalf("a refused section must carry no replacement text, got %s", out.HookSpecificOutput.UpdatedInput)
 	}
-	reason := out.HookSpecificOutput.PermissionDecisionReason
-	if !strings.HasPrefix(reason, "[Cause section] ") || !strings.Contains(reason, words(40)) {
-		t.Fatalf("the refusal must name the section and carry its untagged rewrite, got %q", reason)
+	if !strings.HasPrefix(out.HookSpecificOutput.PermissionDecisionReason, "[Cause section] ") {
+		t.Fatalf("the refusal must name the section, got %q", out.HookSpecificOutput.PermissionDecisionReason)
 	}
-	if *calls != 1 {
-		t.Fatalf("want one rewrite call, for Cause only, got %d", *calls)
+	if *calls != 0 {
+		t.Fatalf("no model call may be made for a flagged section, got %d", *calls)
 	}
 }
 
