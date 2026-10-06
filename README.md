@@ -9,9 +9,9 @@ both sits a word budget — 150 words for an issue or PR description, 120 for a 
 excluded — as a narrower backstop: neither cope nor basanite is built to score sheer length,
 independent of register or vocabulary. Any of the checks flagging a body returns
 `permissionDecision: "deny"` — the reason goes to Claude, not a human, so it rewrites and retries on
-its own instead of paging anyone — **or, on a Linear write, ticketvoice fixes it itself first: see
-[Auto-rewrite](#auto-rewrite), on by default and the one check here that spends real money without
-being asked.** No prompt when a body clears every check — on Linear it still tags the body as
+its own instead of paging anyone — **and on a Linear write the deny carries a passing rewrite for the
+author to check and send: see [Auto-rewrite](#auto-rewrite), on by default and the one check here that
+spends real money without being asked.** No prompt when a body clears every check — on Linear it still tags the body as
 agent-authored before letting it through; see [Agent tag](#agent-tag).
 
 Two more checks, both first-party (built here, not delegated to a sibling binary): an issue
@@ -107,16 +107,19 @@ rewrite and resubmit on its own — reliable most of the time, not always: somet
 session asks the operator to fix the ticket by hand instead of retrying, which defeats the point of
 routing the reason back to the model at all. For the categories a rewrite can actually fix — a
 `cope`- or `basanite`-flagged voice/vocabulary issue, or over-budget length — ticketvoice fixes the
-text itself, inside the hook, before ever denying:
+text itself, inside the hook, and hands the fix back with the deny:
 
 1. One bounded call to `claude-sonnet-5` (`TICKETVOICE_REWRITE_MODEL` overrides), given the original
    text and the specific violation(s) it was flagged for.
 2. The candidate is re-validated against **every** check the original text went through — not just
    the ones that triggered the rewrite, since a rewrite that trims a paragraph could just as easily
    mangle a citation or delete an impact line that was there.
-3. Only if the candidate comes back fully clean does the write proceed — `allow`, with the
-   rewritten, 🤖-tagged text substituted in via `updatedInput`. Nothing is shown to you, and nothing
-   asks the calling Claude session to do anything.
+3. Only if the candidate comes back fully clean is it offered: the write is denied with the
+   candidate in the reason, and the calling session sends it as-is or revises its own draft. It is
+   never saved in the author's place. The rewriting model sees only the draft, and a length or voice
+   fix can reverse a claim while every SHA and id survives: on 2026-10-06 a CUR-1957 comment saying a
+   PR "doesn't measure #1838 on its own" was stored as "isolates #1838 from the planner". The author
+   knows what it meant; the rewriter doesn't.
 
 If the rewrite call fails, times out, or the candidate still doesn't pass every check, the write
 falls through to today's deny-and-retry behavior exactly as if auto-rewrite didn't exist — same

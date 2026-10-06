@@ -530,8 +530,19 @@ func stalledNote(kind string, attempt int, cope, basanite, impact budgetgate.Jud
 	return b.String()
 }
 
+// suggestionReason is the deny reason that hands a clean rewrite back to its author. The rewrite is
+// never saved in the author's place: the rewriting model sees only the draft, and a length or voice
+// fix can reverse a claim while every SHA and id survives (2026-10-06, CUR-1957: "doesn't measure
+// #1838 on its own" was stored as "isolates #1838 from the planner"). The author knows what it meant.
+func suggestionReason(rewritten string) string {
+	return "Flagged for length or voice. This version passes every check:\n\n" + rewritten +
+		"\n\nIt was written by a model that saw only your draft, and it can drop a qualifier or reverse a " +
+		"claim. Send it as-is only if every claim, negation and number still says what you meant; " +
+		"otherwise revise your own draft. " + retryNowLine
+}
+
 // tryAutoRewrite attempts one auto-fix for a flagged Linear write, replacing "deny and hope the
-// calling agent retries" with "rewrite, verify, then allow" for the categories a rewrite can
+// calling agent retries" with "deny with a passing rewrite attached" for the categories a rewrite can
 // actually fix (over-budget length, a cope voice/structure hit, a basanite vocabulary tic).
 // Returns ok=false — meaning "fall through to today's deny-and-retry behavior, unchanged" — for
 // anything not a Linear MCP tool (a Bash/gh-write call has no field to apply a rewrite to), a
@@ -744,16 +755,12 @@ func runHookWithInput(raw []byte) *hookOutput {
 	// skips even resolving a client, so a set flag costs nothing beyond the check itself.
 	if os.Getenv("TICKETVOICE_NO_AUTOREWRITE") == "" {
 		rewriter, _ := autorewrite.New(in.Cwd)
-		if candidate, rewritten, ok := tryAutoRewrite(in, kind, text, over, budgetReason, budget, cope, basanite, citations, impact, linear, rewriter); ok {
+		if _, rewritten, ok := tryAutoRewrite(in, kind, text, over, budgetReason, budget, cope, basanite, citations, impact, linear, rewriter); ok {
 			attemptstate.Clear(key)
 			var out hookOutput
 			out.HookSpecificOutput.HookEventName = "PreToolUse"
-			out.HookSpecificOutput.PermissionDecision = "allow"
-			out.HookSpecificOutput.UpdatedInput = candidate
-			// Say so. A silent swap leaves the caller believing its own draft was stored.
-			out.HookSpecificOutput.AdditionalContext = fmt.Sprintf("ticketvoice rewrote this %s before saving it "+
-				"(your draft was flagged for length or voice). What was stored:\n\n%s\n\nIf that lost or changed "+
-				"anything you meant, save your own revision over it.", kind, rewritten)
+			out.HookSpecificOutput.PermissionDecision = "deny"
+			out.HookSpecificOutput.PermissionDecisionReason = suggestionReason(rewritten)
 			return &out
 		}
 	}

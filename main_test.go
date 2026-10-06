@@ -11,8 +11,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-
-	"github.com/justinstimatze/ticketvoice/internal/budgetgate"
 )
 
 func words(n int) string { return strings.TrimSpace(strings.Repeat("word ", n)) }
@@ -685,7 +683,10 @@ func fakeAutorewriteServer(t *testing.T, rewritten string) (url string, calls *i
 	return srv.URL, calls
 }
 
-func TestRunHookAutoRewriteSucceedsAndAllows(t *testing.T) {
+// A clean rewrite is handed back to its author, never saved in the author's place: the rewriting
+// model sees only the draft, and on CUR-1957 (2026-10-06) a stored voice fix turned "doesn't
+// measure #1838 on its own" into "isolates #1838 from the planner" with every id intact.
+func TestRunHookCleanRewriteIsSuggestedNeverStored(t *testing.T) {
 	clean(t)
 	freshState(t)
 	isolateAutorewriteEnv(t)
@@ -693,28 +694,23 @@ func TestRunHookAutoRewriteSucceedsAndAllows(t *testing.T) {
 
 	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + cleanIssueBody(200) + `"}}`)
 	out := runHookWithInput(raw)
-	if out == nil || out.HookSpecificOutput.PermissionDecision != "allow" {
-		t.Fatalf("a rewrite that re-validates clean must allow, got %+v", out)
+	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("a flagged write must be refused even when a clean rewrite exists, got %+v", out)
 	}
-	if out.HookSpecificOutput.UpdatedInput == nil {
-		t.Fatal("a successful auto-rewrite must carry the candidate as UpdatedInput")
+	if out.HookSpecificOutput.UpdatedInput != nil {
+		t.Fatalf("the rewrite must never be stored in the author's place, got %s", out.HookSpecificOutput.UpdatedInput)
 	}
-	var in struct {
-		Description string `json:"description"`
-	}
-	if err := json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &in); err != nil {
-		t.Fatalf("UpdatedInput must round-trip as the original object shape: %v", err)
-	}
-	wantSuffix := budgetgate.AgentTag + cleanRewrittenText(20)
-	if in.Description != wantSuffix {
-		t.Fatalf("UpdatedInput must carry the tagged REWRITTEN text, not the original, got %q want %q", in.Description, wantSuffix)
+	if reason := out.HookSpecificOutput.PermissionDecisionReason; !strings.Contains(reason, cleanRewrittenText(20)) {
+		t.Fatalf("the refusal must carry the rewrite for the author to send or revise, got %q", reason)
 	}
 	if *calls != 1 {
 		t.Fatalf("want exactly one rewrite call, got %d", *calls)
 	}
-	if ctx := out.HookSpecificOutput.AdditionalContext; !strings.Contains(ctx, "ticketvoice rewrote") ||
-		!strings.Contains(ctx, cleanRewrittenText(20)) {
-		t.Fatalf("a rewrite must be disclosed with the stored text, got context %q", ctx)
+
+	// Sent back as-is, the suggestion passes.
+	resend := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + cleanRewrittenText(20) + `"}}`)
+	if again := runHookWithInput(resend); again != nil && again.HookSpecificOutput.PermissionDecision == "deny" {
+		t.Fatalf("the suggested text must pass when the author sends it, got %+v", again)
 	}
 }
 
@@ -851,30 +847,6 @@ func TestRunHookAutoRewriteNeverAttemptedForAPatch(t *testing.T) {
 	runHookWithInput(raw)
 	if *calls != 0 {
 		t.Fatalf("a patch call must never attempt a rewrite, got %d calls", *calls)
-	}
-}
-
-func TestRunHookAutoRewriteRespectsNoAgentTag(t *testing.T) {
-	clean(t)
-	freshState(t)
-	isolateAutorewriteEnv(t)
-	t.Setenv("TICKETVOICE_NO_AGENT_TAG", "1")
-	fakeAutorewriteServer(t, cleanRewrittenText(20))
-
-	raw := []byte(`{"tool_name":"mcp__linear__save_issue","tool_input":{"description":"` + cleanIssueBody(200) + `"}}`)
-	out := runHookWithInput(raw)
-	if out == nil || out.HookSpecificOutput.PermissionDecision != "allow" {
-		t.Fatalf("want a successful rewrite to still allow with the tag disabled, got %+v", out)
-	}
-	var in struct {
-		Description string `json:"description"`
-	}
-	json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &in)
-	if strings.HasPrefix(in.Description, budgetgate.AgentTag) {
-		t.Fatalf("the tag must not be applied when disabled, got %q", in.Description)
-	}
-	if in.Description != cleanRewrittenText(20) {
-		t.Fatalf("the candidate must still reach UpdatedInput untagged, not vanish, got %q", in.Description)
 	}
 }
 

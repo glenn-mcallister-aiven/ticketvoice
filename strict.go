@@ -174,9 +174,9 @@ func (u strictUnit) siblingPayload() []byte {
 }
 
 type strictVerdict struct {
-	deny      string
-	rewritten string
-	note      string
+	deny       string
+	suggestion string
+	note       string
 }
 
 // A list section skips cope and basanite. Both read paragraphs, and on evidence lines they join one
@@ -198,8 +198,9 @@ func judgeAll(u strictUnit, text, cwd string, linear *linearclient.Client) (cope
 }
 
 // judgeStrictUnit runs one unit through the same checks and retry rules as a whole body: over
-// budget or a bad citation always denies; a cope or basanite hit is rewritten when a rewrite comes
-// back clean, and lets the write through with a note on the third attempt that shrinks nothing.
+// budget or a bad citation always denies; a cope or basanite hit is denied with a rewrite attached
+// when one comes back clean, and lets the write through with a note on the third attempt that
+// shrinks nothing.
 // commentAdvisoryRules are cope rules that warn on a strict comment instead of refusing it. A
 // strict comment reports evidence, and "X happened, but Y has not" is often the whole finding: on
 // the canary, clause_symmetry refused such a sentence twice and the agent cut a fact to get past it
@@ -241,7 +242,7 @@ func judgeStrictUnit(in hookInput, anchor string, u strictUnit, linear *linearcl
 	if rewriter != nil && !u.rule.lines && !citations.Flagged {
 		if candidate, ok := strictRewrite(in.Cwd, u, over, budgetReason, cope, basanite, linear, rewriter); ok {
 			attemptstate.Clear(key)
-			return strictVerdict{rewritten: candidate}
+			return strictVerdict{suggestion: candidate}
 		}
 	}
 
@@ -311,7 +312,8 @@ func strictRewrite(cwd string, u strictUnit, over bool, budgetReason string, cop
 }
 
 // runStrict judges every unit in a strict call on its own. Any deny refuses the call, naming each
-// unit that failed; otherwise each rewrite goes into its own field and is disclosed.
+// unit that failed, and a unit with a clean rewrite is denied with that rewrite attached for its
+// author to send or revise.
 func runStrict(in hookInput, field string) *hookOutput {
 	var input map[string]any
 	if json.Unmarshal(in.ToolInput, &input) != nil {
@@ -329,17 +331,13 @@ func runStrict(in hookInput, field string) *hookOutput {
 	anchor, _ := input["issue"].(string)
 
 	var denies, notes []string
-	rewrote := false
 	for _, u := range units {
 		v := judgeStrictUnit(in, anchor, u, linear, rewriter)
 		switch {
 		case v.deny != "":
 			denies = append(denies, fmt.Sprintf("[%s] %s", u.label, v.deny))
-		case v.rewritten != "":
-			u.set(v.rewritten)
-			rewrote = true
-			notes = append(notes, fmt.Sprintf("ticketvoice rewrote the %s before saving it (flagged for length or voice). "+
-				"What was stored:\n\n%s\n\nIf that lost or changed anything you meant, write your own revision over it.", u.label, v.rewritten))
+		case v.suggestion != "":
+			denies = append(denies, fmt.Sprintf("[%s] %s", u.label, suggestionReason(v.suggestion)))
 		case v.note != "":
 			notes = append(notes, v.note)
 		}
@@ -352,16 +350,8 @@ func runStrict(in hookInput, field string) *hookOutput {
 		out.HookSpecificOutput.PermissionDecisionReason = strings.Join(denies, "\n\n") + "\n\n" + retryNowLine
 		return &out
 	}
-	if !rewrote && len(notes) == 0 {
+	if len(notes) == 0 {
 		return nil
-	}
-	if rewrote {
-		updated, err := json.Marshal(input)
-		if err != nil {
-			return nil
-		}
-		out.HookSpecificOutput.PermissionDecision = "allow"
-		out.HookSpecificOutput.UpdatedInput = updated
 	}
 	out.HookSpecificOutput.AdditionalContext = strings.Join(notes, "\n\n")
 	return &out

@@ -149,8 +149,9 @@ func TestStrictSiblingFlagNamesTheSection(t *testing.T) {
 	}
 }
 
-// A rewrite goes back into the section it came from, untagged, and every other field survives.
-func TestStrictRewriteLandsInItsSection(t *testing.T) {
+// A clean rewrite of one section is handed back in the refusal, named by its section, and nothing
+// is stored: the author decides whether it still says what they meant.
+func TestStrictRewriteIsSuggestedNotStored(t *testing.T) {
 	strictEnv(t)
 	isolateAutorewriteEnv(t)
 	_, calls := fakeAutorewriteServer(t, "🤖 "+words(40))
@@ -160,29 +161,18 @@ func TestStrictRewriteLandsInItsSection(t *testing.T) {
 			map[string]any{"section": "Cause", "mode": "replace", "body": words(150)},
 		},
 	})
-	if out == nil || out.HookSpecificOutput.PermissionDecision != "allow" {
-		t.Fatalf("a clean rewrite must allow, got %+v", out)
+	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("a flagged section must be refused even with a clean rewrite, got %+v", out)
 	}
-	var got struct {
-		Issue string `json:"issue"`
-		Patch []struct {
-			Section, Mode, Body string
-		} `json:"patch"`
+	if out.HookSpecificOutput.UpdatedInput != nil {
+		t.Fatalf("the rewrite must never be stored, got %s", out.HookSpecificOutput.UpdatedInput)
 	}
-	if err := json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &got); err != nil {
-		t.Fatal(err)
-	}
-	if got.Issue != "ENG-1" || len(got.Patch) != 2 || got.Patch[0].Body != observedLine(10) || got.Patch[1].Mode != "replace" {
-		t.Fatalf("fields outside the rewritten section changed: %+v", got)
-	}
-	if got.Patch[1].Body != words(40) {
-		t.Fatalf("the Cause section must carry the untagged rewrite, got %q", got.Patch[1].Body)
+	reason := out.HookSpecificOutput.PermissionDecisionReason
+	if !strings.HasPrefix(reason, "[Cause section] ") || !strings.Contains(reason, words(40)) {
+		t.Fatalf("the refusal must name the section and carry its untagged rewrite, got %q", reason)
 	}
 	if *calls != 1 {
 		t.Fatalf("want one rewrite call, for Cause only, got %d", *calls)
-	}
-	if ctx := out.HookSpecificOutput.AdditionalContext; !strings.Contains(ctx, "rewrote the Cause section") {
-		t.Errorf("the rewrite must be disclosed, got %q", ctx)
 	}
 }
 
