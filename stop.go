@@ -34,6 +34,10 @@ func runStop(stdin io.Reader, stdout io.Writer) int {
 	}
 	var live []attemptstate.Pending
 	for _, p := range attemptstate.PendingFor(in.SessionID) {
+		// A record with no label predates this hook (2026-10-06) and carries no reason to show.
+		if p.Record.Label == "" {
+			continue
+		}
 		if p.Record.Stops >= maxStops {
 			attemptstate.LogDropped(in.SessionID, p, fmt.Sprintf("Stop hook gave up after %d blocked turn ends", maxStops))
 			p.Remove()
@@ -52,9 +56,7 @@ func runStop(stdin io.Reader, stdout io.Writer) int {
 		r := p.Record
 		r.Stops++
 		p.Update(r)
-		if r.Label == "" {
-			r.Label = "a Linear write (denied before labels were recorded)"
-		}
+
 		fmt.Fprintf(&b, "\n[%s] %s — block %d of %d\n%s\n", p.ID, r.Label, r.Stops, maxStops, r.Reason)
 	}
 	b.WriteString("\nIf a write is no longer wanted (superseded, or posted another way), drop it on the record: " +
