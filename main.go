@@ -631,7 +631,8 @@ func runHookWithInput(raw []byte) *hookOutput {
 	}
 	reason += "\n\n" + retryNowLine
 
-	attemptstate.Save(key, attemptstate.Record{Attempts: attempt, Prior: curIDs})
+	attemptstate.Save(key, attemptstate.Record{Attempts: attempt, Prior: curIDs,
+		Label: pendingLabel(kind, identity, in.ToolName), Reason: clip(reason, 600)})
 
 	var out hookOutput
 	out.HookSpecificOutput.HookEventName = "PreToolUse"
@@ -753,6 +754,26 @@ func runCheck(args []string) int {
 	return 1
 }
 
+// pendingLabel names a denied write for the Stop hook's list, e.g. "comment on CUR-12 (save_comment)".
+func pendingLabel(kind, anchor, tool string) string {
+	if anchor == "" {
+		anchor = "a new item"
+	}
+	if i := strings.LastIndex(tool, "__"); i >= 0 {
+		tool = tool[i+2:]
+	}
+	return fmt.Sprintf("%s on %s (%s)", kind, anchor, tool)
+}
+
+// clip shortens s to at most n runes, marking the cut.
+func clip(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
+
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -761,6 +782,10 @@ func main() {
 			return
 		case "--check":
 			os.Exit(runCheck(os.Args[2:]))
+		case "stop":
+			os.Exit(runStop(os.Stdin, os.Stdout))
+		case "drop":
+			os.Exit(runDrop(os.Args[2:], os.Stdout))
 		}
 	}
 	runHook()

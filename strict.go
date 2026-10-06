@@ -260,7 +260,8 @@ func judgeStrictUnit(in hookInput, anchor string, u strictUnit, linear *linearcl
 	if delta := deltaNote(rec.Prior, ids); delta != "" {
 		reason += "\n\n" + delta
 	}
-	attemptstate.Save(key, attemptstate.Record{Attempts: attempt, Prior: ids})
+	attemptstate.Save(key, attemptstate.Record{Attempts: attempt, Prior: ids,
+		Label: pendingLabel(u.label, anchor, in.ToolName), Reason: clip(reason, 600)})
 	return strictVerdict{deny: reason}
 }
 

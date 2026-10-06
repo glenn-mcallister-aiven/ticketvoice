@@ -95,6 +95,26 @@ session id, so it has nothing to key a retry sequence on — every gh-write refu
 `TICKETVOICE_STATE_DIR` overrides where the attempt state lives; see
 [Configuration](#configuration).
 
+## A denied write can't be walked away from
+
+A deny reaches the agent mid-turn, and nothing used to stop it ending the turn there: moving on,
+or asking the operator to rewrite the ticket. That second move is what auto-rewrite was built to
+prevent (2026-09-05), and the answer is to send the rewrite back to the author, not to write it.
+
+`ticketvoice stop` is a `Stop` hook. Each denied write keeps its attempt-state file until a write
+to the same target lands, so a file left at turn end is a write that never posted. While this
+session has one, the hook blocks the turn with `{"decision":"block"}`, naming each write, its
+deny reason, and a short id. The agent rewrites and posts, or drops it on the record:
+
+```bash
+ticketvoice drop 3f9a1c2e --reason "superseded by the comment on CUR-4"
+```
+
+A drop with no `--reason` is refused. A write that has blocked three turn ends is given up on, so
+a loop can't hold the session. Both cases append a line to `dropped.jsonl` in the state directory.
+`TestStopBlocksTheTurnWhileADeniedWriteHasNotBeenRewritten` fails if a denied write stops holding
+the turn.
+
 ## No rewrites
 
 ticketvoice denies and says why; it never writes prose for the author, stored or offered. From
@@ -209,6 +229,15 @@ directory on `PATH`:
     ]
   }
 }
+```
+
+Wire `ticketvoice stop` as a `Stop` hook too, so a denied write can't be left behind (see
+[above](#a-denied-write-cant-be-walked-away-from)):
+
+```json
+"Stop": [
+  { "matcher": "", "hooks": [ { "type": "command", "command": "/home/you/go/bin/ticketvoice stop" } ] }
+]
 ```
 
 There's no installer subcommand — this is a plain hook binary, wired by hand once. Matching on

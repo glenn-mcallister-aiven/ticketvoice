@@ -1,5 +1,15 @@
 # Changelog
 
+## A denied write holds the turn until it's rewritten or dropped — 2026-10-06
+
+`ticketvoice stop` is a new `Stop` hook. Auto-rewrite (2026-09-05) existed because an agent
+handed a denied ticket back to the operator instead of rewriting it; with the rewriter gone, the
+same gap needs closing from the other side. While a session has a denied write that never landed,
+the turn can't end: the hook names each write with its reason and a short id. `ticketvoice drop
+<id> --reason "<why>"` clears one on purpose. After three blocked turn ends a write is given up on,
+and every drop is logged to `dropped.jsonl`. Attempt records now carry the write's label and deny
+reason. The block-and-give-up shape follows plancheck's ExitPlanMode gate.
+
 ## No model writes prose for the author — 2026-10-06
 
 Auto-rewrite is gone, and `internal/autorewrite` with it. A flagged write is denied with its

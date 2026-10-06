@@ -8,10 +8,14 @@
 package attemptstate
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"time"
 )
 
 // validSessionID accepts the shapes Claude Code emits and rejects anything that could escape the
@@ -66,7 +70,7 @@ func slug(s string) string {
 }
 
 func (k Key) fileName() string {
-	return "attempts-" + k.SessionID + "-" + slug(k.Tool) + "-" + slug(k.Kind) + "-" + slug(k.Anchor) + ".json"
+	return prefix + k.SessionID + "-" + slug(k.Tool) + "-" + slug(k.Kind) + "-" + slug(k.Anchor) + ".json"
 }
 
 // Record is one retry sequence's state: how many times in a row this key has just been denied,
@@ -74,6 +78,11 @@ func (k Key) fileName() string {
 type Record struct {
 	Attempts int      `json:"attempts"`
 	Prior    []string `json:"prior,omitempty"`
+	// Label and Reason say what was denied and why, so the Stop hook can name a write that was
+	// refused and never rewritten. Stops counts the turn ends this record has already blocked.
+	Label  string `json:"label,omitempty"`
+	Reason string `json:"reason,omitempty"`
+	Stops  int    `json:"stops,omitempty"`
 }
 
 // Load returns the stored record, or a zero Record when there is none, or when the file is
@@ -127,4 +136,114 @@ func Clear(k Key) {
 		return
 	}
 	_ = os.Remove(filepath.Join(dir, k.fileName()))
+}
+
+// Pending is one denied write that hasn't been rewritten yet: its record, and the short id that
+// `ticketvoice drop` takes.
+type Pending struct {
+	ID     string
+	Record Record
+	file   string
+}
+
+const prefix = "attempts-"
+
+// shortID is a stable 8-hex id for a state file, short enough to type into `ticketvoice drop`.
+func shortID(file string) string {
+	sum := sha256.Sum256([]byte(file))
+	return hex.EncodeToString(sum[:4])
+}
+
+// PendingFor lists every write this session had denied and has not since landed. A record exists
+// exactly while its last attempt was denied: Clear runs on every allowed write of the same key.
+func PendingFor(sessionID string) []Pending {
+	if !validSessionID(sessionID) {
+		return nil
+	}
+	dir, err := Dir()
+	if err != nil {
+		return nil
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, prefix+sessionID+"-*.json"))
+	sort.Strings(matches)
+	var out []Pending
+	for _, m := range matches {
+		raw, err := os.ReadFile(m)
+		if err != nil {
+			continue
+		}
+		var r Record
+		if json.Unmarshal(raw, &r) != nil {
+			continue
+		}
+		name := filepath.Base(m)
+		out = append(out, Pending{ID: shortID(name), Record: r, file: name})
+	}
+	return out
+}
+
+// Update rewrites a pending record in place, for the Stop hook's block counter.
+func (p Pending) Update(r Record) {
+	dir, err := Dir()
+	if err != nil {
+		return
+	}
+	if raw, err := json.Marshal(r); err == nil {
+		_ = os.WriteFile(filepath.Join(dir, p.file), raw, 0o644)
+	}
+}
+
+// Remove deletes a pending record.
+func (p Pending) Remove() {
+	if dir, err := Dir(); err == nil {
+		_ = os.Remove(filepath.Join(dir, p.file))
+	}
+}
+
+// FindByID looks a pending record up by its short id across every session, since the Bash call
+// that runs `ticketvoice drop` doesn't know its own session id.
+func FindByID(id string) (Pending, bool) {
+	dir, err := Dir()
+	if err != nil {
+		return Pending{}, false
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, prefix+"*.json"))
+	for _, m := range matches {
+		name := filepath.Base(m)
+		if shortID(name) != id {
+			continue
+		}
+		raw, err := os.ReadFile(m)
+		if err != nil {
+			return Pending{}, false
+		}
+		var r Record
+		if json.Unmarshal(raw, &r) != nil {
+			return Pending{}, false
+		}
+		return Pending{ID: id, Record: r, file: name}, true
+	}
+	return Pending{}, false
+}
+
+// LogDropped appends one line to dropped.jsonl, the record of every denied write that ended up
+// never posting, whether the author dropped it or the Stop hook gave up on it.
+func LogDropped(sessionID string, p Pending, why string) {
+	dir, err := Dir()
+	if err != nil {
+		return
+	}
+	line, err := json.Marshal(map[string]any{
+		"ts": time.Now().UTC().Format(time.RFC3339), "session": sessionID, "id": p.ID,
+		"label": p.Record.Label, "why": why,
+	})
+	if err != nil {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "dropped.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.Write(append(line, '\n'))
 }
