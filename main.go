@@ -41,10 +41,8 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/justinstimatze/ticketvoice/internal/attemptstate"
-	"github.com/justinstimatze/ticketvoice/internal/autorewrite"
 	"github.com/justinstimatze/ticketvoice/internal/budgetgate"
 	"github.com/justinstimatze/ticketvoice/internal/citecheck"
 	"github.com/justinstimatze/ticketvoice/internal/ghcmd"
@@ -654,42 +652,6 @@ func taggedInput(tool string, raw json.RawMessage, kind string) json.RawMessage 
 	return out
 }
 
-// taggedRewrite substitutes an auto-rewritten candidate for the original field's value — unlike
-// taggedInput, whose entire job IS the tag, so it returns nil when tagging is disabled.
-// Here the substitution is the job, and the tag is secondary: returning nil on a disabled tag would
-// silently let an already-flagged original body through unmodified whenever TICKETVOICE_NO_AGENT_TAG
-// is set, defeating the whole feature. So the field is always replaced with candidate, prefixed
-// with the tag only when AgentTagEnabled() is true. nil is reserved for a genuine failure to
-// determine the field or round-trip the input as an object — the caller already treats that as
-// ok=false, never as "let the original text through."
-func taggedRewrite(tool string, raw json.RawMessage, kind, candidate string) json.RawMessage {
-	// Only a top-level field is replaced: auto-rewrite is Linear-only (see tryAutoRewrite), and
-	// every Linear path tagPath returns is one element long.
-	path := tagPath(tool, kind)
-	if len(path) != 1 {
-		return nil
-	}
-	field := path[0]
-	var obj map[string]json.RawMessage
-	if json.Unmarshal(raw, &obj) != nil {
-		return nil
-	}
-	val := candidate
-	if budgetgate.AgentTagEnabled() {
-		val = budgetgate.AgentTag + val
-	}
-	tagged, err := json.Marshal(val)
-	if err != nil {
-		return nil
-	}
-	obj[field] = tagged
-	out, err := json.Marshal(obj)
-	if err != nil {
-		return nil
-	}
-	return out
-}
-
 // retryNowLine replaces the old "Cut it and call again," which told the model what to do but not
 // what to refrain from. The observed failure was Claude choosing to ask the operator to rewrite
 // the ticket by hand instead of retrying itself, so the line has to name that choice, not just the
@@ -758,129 +720,6 @@ func stalledNote(kind string, attempt int, cope, basanite, impact budgetgate.Jud
 		fmt.Fprintf(&b, "\n\n%s", impact.Note)
 	}
 	return b.String()
-}
-
-// tryAutoRewrite attempts one auto-fix for a flagged Linear write, replacing "deny and hope the
-// calling agent retries" with "rewrite, verify, then allow" for the categories a rewrite can
-// actually fix (over-budget length, a cope voice/structure hit, a basanite vocabulary tic).
-// Returns ok=false — meaning "fall through to today's deny-and-retry behavior, unchanged" — for
-// anything not a Linear MCP tool (a Bash/gh-write call has no field to apply a rewrite to), a
-// patch (same reason), any check outside the auto-fixable set (citations, impact — see the plan's
-// Context section for why those are excluded on purpose), a missing autorewrite client, or a
-// rewrite whose candidate doesn't fully re-validate clean. Never touches internal/attemptstate —
-// only runHookWithInput does, exactly once, on whichever branch actually runs.
-func tryAutoRewrite(in hookInput, kind, text string, over bool, budgetReason string, budget int,
-	cope, basanite, citations, impact budgetgate.Judgment, linear *linearclient.Client,
-	rewriter *autorewrite.Client) (candidate json.RawMessage, rewritten string, ok bool) {
-
-	// TODO: extend to Jira. A Jira comment is one field and would fit as is; a create or edit
-	// carries a summary and a body, and this takes one.
-	if budgetgate.Vendor(in.ToolName) != "linear" {
-		return nil, "", false
-	}
-	if citations.Flagged || impact.Flagged {
-		return nil, "", false
-	}
-	if len(tagPath(in.ToolName, kind)) != 1 {
-		return nil, "", false
-	}
-	if !over && !cope.Flagged && !basanite.Flagged {
-		return nil, "", false
-	}
-	if rewriter == nil {
-		return nil, "", false
-	}
-
-	var violations []string
-	if over {
-		violations = append(violations, budgetReason)
-	}
-	if cope.Flagged {
-		violations = append(violations, cope.Note)
-	}
-	if basanite.Flagged {
-		violations = append(violations, basanite.Note)
-	}
-
-	var err error
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	rewritten, err = rewriter.Rewrite(ctx, kind, text, violations)
-	if err != nil {
-		return nil, "", false
-	}
-
-	// Re-validate the CANDIDATE against every check the original text went through, not just the
-	// ones that triggered the rewrite — concurrently, so this second pass doesn't stack on top of
-	// the rewrite call's own 8s. A rewrite that trims a paragraph could just as easily mangle a
-	// citation or delete an impact line that was there.
-	var newCope, newBasanite, newCitations budgetgate.Judgment
-	var wg sync.WaitGroup
-	wg.Add(3)
-	candPayload := budgetgate.LinearPayload(kind, rewritten)
-	go func() { defer wg.Done(); newCope = judgeCope(candPayload) }()
-	go func() { defer wg.Done(); newBasanite = judgeBasanite(candPayload) }()
-	go func() {
-		defer wg.Done()
-		newCitations, _ = citecheck.Judge(context.Background(), linear, in.Cwd, rewritten)
-	}()
-	wg.Wait()
-
-	if newOver, _ := evaluate(rewritten, kind, budget); newOver {
-		return nil, "", false
-	}
-	if newCope.Flagged || newBasanite.Flagged || newCitations.Flagged {
-		return nil, "", false
-	}
-	if kind == "issue description" && impactline.Judge(rewritten).Flagged {
-		return nil, "", false
-	}
-
-	// A length or voice rewrite may drop prose, never evidence, and may add none: a candidate that
-	// loses a SHA, ticket id, path or URL, or introduces one the author never wrote, is a different
-	// ticket wearing the same title (22 Sep 2026: a rewrite of CUR-1689 invented a go-red criterion).
-	if !sameEvidence(text, rewritten) {
-		return nil, "", false
-	}
-
-	out := taggedRewrite(in.ToolName, in.ToolInput, kind, rewritten)
-	if out == nil {
-		return nil, "", false
-	}
-	return out, rewritten, true
-}
-
-var evidencePats = []*regexp.Regexp{
-	regexp.MustCompile(`\b[0-9a-f]{7,40}\b`),
-	regexp.MustCompile(`\b[A-Z]{2,5}-\d+\b`),
-	regexp.MustCompile(`(?:^|[^\w/])#\d{2,5}\b`),
-	regexp.MustCompile(`https?://[^\s)>\]` + "`" + `]+`),
-	regexp.MustCompile(`[\w./-]+\.(?:ts|js|mjs|svelte|py|sh|yml|yaml|json|md|go|toml|sql)(?::\d+(?:-\d+)?)?`),
-}
-
-// evidenceTokens is the set of citation-shaped tokens in s: SHAs, ticket ids, PR numbers, URLs and
-// file paths. Two texts with the same set carry the same evidence, whatever else changed.
-func evidenceTokens(s string) map[string]bool {
-	out := map[string]bool{}
-	for _, re := range evidencePats {
-		for _, m := range re.FindAllString(s, -1) {
-			out[strings.Trim(strings.TrimSpace(m), "#.,;:")] = true
-		}
-	}
-	return out
-}
-
-func sameEvidence(orig, cand string) bool {
-	a, b := evidenceTokens(orig), evidenceTokens(cand)
-	if len(a) != len(b) {
-		return false
-	}
-	for t := range a {
-		if !b[t] {
-			return false
-		}
-	}
-	return true
 }
 
 // runHookWithInput is the hook's decision logic, taking the raw bytes so the same bytes can be
@@ -1018,27 +857,6 @@ func runHookWithInput(raw []byte) *hookOutput {
 		return &out
 	}
 
-	// Try to fix it instead of denying it, before any attempt-counting starts — see
-	// tryAutoRewrite's own doc comment for the exact scope this covers. TICKETVOICE_NO_AUTOREWRITE
-	// skips even resolving a client, so a set flag costs nothing beyond the check itself.
-	if os.Getenv("TICKETVOICE_NO_AUTOREWRITE") == "" {
-		rewriter, _ := autorewrite.New(in.Cwd)
-		// A Linear call carries exactly one field, so the body is the whole of what was judged.
-		budget := budgetgate.BudgetForKind(body.Kind, body.Budget)
-		if candidate, rewritten, ok := tryAutoRewrite(in, body.Kind, body.Text, over, strings.Join(overReasons, "\n\n"), budget, cope, basanite, citations, impact, linear, rewriter); ok {
-			attemptstate.Clear(key)
-			var out hookOutput
-			out.HookSpecificOutput.HookEventName = "PreToolUse"
-			out.HookSpecificOutput.PermissionDecision = "allow"
-			out.HookSpecificOutput.UpdatedInput = candidate
-			// Say so. A silent swap leaves the caller believing its own draft was stored.
-			out.HookSpecificOutput.AdditionalContext = fmt.Sprintf("ticketvoice rewrote this %s before saving it "+
-				"(your draft was flagged for length or voice). What was stored:\n\n%s\n\nIf that lost or changed "+
-				"anything you meant, save your own revision over it.", body.Kind, rewritten)
-			return &out
-		}
-	}
-
 	var impactIDs []string
 	if impact.Flagged {
 		impactIDs = []string{impactline.ViolationID}
@@ -1096,7 +914,8 @@ func runHookWithInput(raw []byte) *hookOutput {
 	}
 	reason += "\n\n" + retryNowLine
 
-	attemptstate.Save(key, attemptstate.Record{Attempts: attempt, Prior: curIDs})
+	attemptstate.Save(key, attemptstate.Record{Attempts: attempt, Prior: curIDs,
+		Label: pendingLabel(body.Kind, identity, in.ToolName), Reason: clip(reason, 600)})
 
 	var out hookOutput
 	out.HookSpecificOutput.HookEventName = "PreToolUse"
@@ -1222,6 +1041,26 @@ func runCheck(args []string) int {
 	return 1
 }
 
+// pendingLabel names a denied write for the Stop hook's list, e.g. "comment on CUR-12 (save_comment)".
+func pendingLabel(kind, anchor, tool string) string {
+	if anchor == "" {
+		anchor = "a new item"
+	}
+	if i := strings.LastIndex(tool, "__"); i >= 0 {
+		tool = tool[i+2:]
+	}
+	return fmt.Sprintf("%s on %s (%s)", kind, anchor, tool)
+}
+
+// clip shortens s to at most n runes, marking the cut.
+func clip(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
+
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -1230,6 +1069,10 @@ func main() {
 			return
 		case "--check":
 			os.Exit(runCheck(os.Args[2:]))
+		case "stop":
+			os.Exit(runStop(os.Stdin, os.Stdout))
+		case "drop":
+			os.Exit(runDrop(os.Args[2:], os.Stdout))
 		}
 	}
 	runHook()

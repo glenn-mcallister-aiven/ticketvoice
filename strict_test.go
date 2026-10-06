@@ -149,40 +149,27 @@ func TestStrictSiblingFlagNamesTheSection(t *testing.T) {
 	}
 }
 
-// A rewrite goes back into the section it came from, untagged, and every other field survives.
-func TestStrictRewriteLandsInItsSection(t *testing.T) {
+// A flagged section is refused by name, with nothing written in its place and no model call.
+func TestStrictFlaggedSectionGetsNoModelProse(t *testing.T) {
 	strictEnv(t)
-	isolateAutorewriteEnv(t)
-	_, calls := fakeAutorewriteServer(t, "🤖 "+words(40))
+	calls := isolateModelEnv(t)
 	out := strictCall(t, "mcp__linear-strict__set_state", map[string]any{
 		"issue": "ENG-1", "patch": []any{
 			map[string]any{"section": "Observed", "mode": "append", "body": observedLine(10)},
 			map[string]any{"section": "Cause", "mode": "replace", "body": words(150)},
 		},
 	})
-	if out == nil || out.HookSpecificOutput.PermissionDecision != "allow" {
-		t.Fatalf("a clean rewrite must allow, got %+v", out)
+	if out == nil || out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("an over-budget section must be refused, got %+v", out)
 	}
-	var got struct {
-		Issue string `json:"issue"`
-		Patch []struct {
-			Section, Mode, Body string
-		} `json:"patch"`
+	if out.HookSpecificOutput.UpdatedInput != nil {
+		t.Fatalf("a refused section must carry no replacement text, got %s", out.HookSpecificOutput.UpdatedInput)
 	}
-	if err := json.Unmarshal(out.HookSpecificOutput.UpdatedInput, &got); err != nil {
-		t.Fatal(err)
+	if !strings.HasPrefix(out.HookSpecificOutput.PermissionDecisionReason, "[Cause section] ") {
+		t.Fatalf("the refusal must name the section, got %q", out.HookSpecificOutput.PermissionDecisionReason)
 	}
-	if got.Issue != "ENG-1" || len(got.Patch) != 2 || got.Patch[0].Body != observedLine(10) || got.Patch[1].Mode != "replace" {
-		t.Fatalf("fields outside the rewritten section changed: %+v", got)
-	}
-	if got.Patch[1].Body != words(40) {
-		t.Fatalf("the Cause section must carry the untagged rewrite, got %q", got.Patch[1].Body)
-	}
-	if *calls != 1 {
-		t.Fatalf("want one rewrite call, for Cause only, got %d", *calls)
-	}
-	if ctx := out.HookSpecificOutput.AdditionalContext; !strings.Contains(ctx, "rewrote the Cause section") {
-		t.Errorf("the rewrite must be disclosed, got %q", ctx)
+	if *calls != 0 {
+		t.Fatalf("no model call may be made for a flagged section, got %d", *calls)
 	}
 }
 

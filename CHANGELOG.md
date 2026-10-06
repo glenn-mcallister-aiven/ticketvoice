@@ -1,5 +1,34 @@
 # Changelog
 
+## Merge upstream's auto-rewrite removal into the Jira branch — 2026-10-06
+
+Upstream dropped auto-rewrite and `internal/autorewrite`; this branch had kept it Linear-only and
+added `taggedRewrite`, `tryAutoRewrite` and the evidence-token guard around it. All of that goes
+with it. `pendingLabel` takes the branch's `body.Kind`, since a Jira call judges several fields.
+The two `TestMain`s are folded into upstream's `testmain_test.go`; the closed-port Anthropic
+endpoint the branch's copy set is dropped, since nothing makes a model call now.
+
+## A denied write holds the turn until it's rewritten or dropped — 2026-10-06
+
+`ticketvoice stop` is a new `Stop` hook. Auto-rewrite (2026-09-05) existed because an agent
+handed a denied ticket back to the operator instead of rewriting it; with the rewriter gone, the
+same gap needs closing from the other side. While a session has a denied write that never landed,
+the turn can't end: the hook names each write with its reason and a short id. `ticketvoice drop
+<id> --reason "<why>"` clears one on purpose. After three blocked turn ends a write is given up on,
+and every drop is logged to `dropped.jsonl`. Attempt records now carry the write's label and deny
+reason. The block-and-give-up shape follows plancheck's ExitPlanMode gate.
+
+## No model writes prose for the author — 2026-10-06
+
+Auto-rewrite is gone, and `internal/autorewrite` with it. A flagged write is denied with its
+reason, and nothing replaces or is offered in place of the author's text. The rewriter saw one
+section or comment at a time; of 450 rewrites recorded from 2026-09-24 to 2026-10-06, 112 changed
+what the text claimed and 25 now say something false or the opposite (CUR-1957: "doesn't measure
+#1838 on its own" became "isolates #1838 from the planner"). Offering the rewrite with the deny,
+tried the same night, still leaves an agent free to resend it unread. `ANTHROPIC_API_KEY`,
+`TICKETVOICE_REWRITE_MODEL`, `TICKETVOICE_ANTHROPIC_ENDPOINT` and `TICKETVOICE_NO_AUTOREWRITE` are
+no longer read.
+
 ## gh-write reads `--body-file` itself — 2026-10-01
 
 Every `gh-write` call from Claude Code ran sandboxed. The `gh-write *` sandbox exclusion matches a
