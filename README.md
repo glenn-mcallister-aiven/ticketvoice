@@ -289,7 +289,8 @@ gh-write pr create --base main --title "Fix X" --body-file tmp/pr-body.md
 
 `pr review` with no `--approve`, `--comment` or `--request-changes` goes out as `--comment`. `comment
 edit` rewrites one existing issue or PR conversation comment by its id, through `gh api`; to edit
-your own last comment, `gh-write issue comment 42 --edit-last` also works.
+your own last comment, `gh-write issue comment 42 --edit-last` also works. An `issue|pr edit`
+with an empty body (a title or label change) leaves the body alone.
 
 Everything gh-write doesn't recognize (`--repo`, `--label`, `--base`, `--draft`, ...) passes
 straight through to `gh`, unchanged. `--body`, `-b` and `--body=` are refused outright.

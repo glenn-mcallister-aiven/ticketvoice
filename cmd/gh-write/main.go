@@ -235,6 +235,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	text := string(body)
 
+	// An issue or PR edit with no body is a title, label or reviewer change, not an order to blank
+	// the description: drop the `--body-file -` so gh leaves the body alone, and skip the gate and
+	// tag, which would otherwise turn "nothing" into a body of just 🤖.
+	// TODO: clearing a description on purpose has no form now; add an explicit flag if it's needed.
+	if (args[0] == "issue" || args[0] == "pr") && args[1] == "edit" && strings.TrimSpace(text) == "" {
+		return runGh(ghArgs[:len(ghArgs)-2], nil, stdout, stderr)
+	}
+
 	if blocked, reason := gateBody(args[0], args[1], text); blocked {
 		fmt.Fprintln(stderr, reason)
 		return 1
@@ -244,8 +252,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		text = budgetgate.AgentTag + text
 	}
 
+	return runGh(ghArgs, strings.NewReader(text), stdout, stderr)
+}
+
+func runGh(ghArgs []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	cmd := exec.Command("gh", ghArgs...)
-	cmd.Stdin = strings.NewReader(text)
+	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {

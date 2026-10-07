@@ -368,3 +368,20 @@ func TestRunForwardsEditLast(t *testing.T) {
 		t.Fatalf("--edit-last must pass straight through: %q", out.String())
 	}
 }
+
+// A title-only edit reads an empty stdin. Passing `--body-file -` then would blank the description.
+func TestRunEditWithNoBodyLeavesTheBodyAlone(t *testing.T) {
+	noSiblings(t)
+	fakeGhOnPath(t)
+	var out, errb bytes.Buffer
+	if code := run([]string{"pr", "edit", "7", "--title", "New"}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("want exit 0, got %d stderr=%q", code, errb.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "ARGS:pr edit 7 --title New\n") || strings.Contains(got, "--body-file") {
+		t.Fatalf("a bodyless edit must not pass --body-file: %q", got)
+	}
+	if strings.Contains(got, budgetgate.AgentTag) {
+		t.Fatalf("a bodyless edit must not send the agent tag as a body: %q", got)
+	}
+}
