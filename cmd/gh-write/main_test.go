@@ -385,3 +385,28 @@ func TestRunEditWithNoBodyLeavesTheBodyAlone(t *testing.T) {
 		t.Fatalf("a bodyless edit must not send the agent tag as a body: %q", got)
 	}
 }
+
+func TestRunPrReplyPostsToTheThread(t *testing.T) {
+	noSiblings(t)
+	fakeGhOnPath(t)
+	var out, errb bytes.Buffer
+	code := run([]string{"pr", "reply", "42", "2918375521", "--repo", "o/r"}, strings.NewReader("fixed"), &out, &errb)
+	if code != 0 {
+		t.Fatalf("want exit 0, got %d stderr=%q", code, errb.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "ARGS:api -X POST repos/o/r/pulls/42/comments/2918375521/replies -F body=@-") {
+		t.Fatalf("pr reply must POST to the comment's replies endpoint: %q", got)
+	}
+	if !strings.Contains(got, "STDIN:"+budgetgate.AgentTag+"fixed") {
+		t.Fatalf("pr reply must tag and forward stdin: %q", got)
+	}
+}
+
+func TestRunPrReplyNeedsBothIDs(t *testing.T) {
+	var out, errb bytes.Buffer
+	code := run([]string{"pr", "reply", "42"}, strings.NewReader(""), &out, &errb)
+	if code != 2 || !strings.Contains(errb.String(), "usage:") {
+		t.Fatalf("want exit 2 and a usage message, got code=%d stderr=%q", code, errb.String())
+	}
+}

@@ -284,13 +284,16 @@ gh-write comment edit 2918375521 --repo you/repo <<'EOF'
 The trimmed comment.
 EOF
 
+gh-write pr reply 42 2918375521 --body-file tmp/reply.md
+
 gh-write pr create --base main --title "Fix X" --body-file tmp/pr-body.md
 ```
 
 `pr review` with no `--approve`, `--comment` or `--request-changes` goes out as `--comment`. `comment
 edit` rewrites one existing issue or PR conversation comment by its id, through `gh api`; to edit
-your own last comment, `gh-write issue comment 42 --edit-last` also works. An `issue|pr edit`
-with an empty body (a title or label change) leaves the body alone.
+your own last comment, `gh-write issue comment 42 --edit-last` also works. `pr reply <pr>
+<comment-id>` answers a review line comment in its thread; the id must be the thread's first
+comment. An `issue|pr edit` with an empty body (a title or label change) leaves the body alone.
 
 Everything gh-write doesn't recognize (`--repo`, `--label`, `--base`, `--draft`, ...) passes
 straight through to `gh`, unchanged. `--body`, `-b` and `--body=` are refused outright.
@@ -311,7 +314,7 @@ for a `--body-file`. The flag's presence decides it; the body is never parsed. O
 position counts, so a commit message or heredoc that mentions one is left alone. If `gh-write`
 isn't on `PATH` the hook lets the call through, since there'd be nothing to point at. Not covered:
 `gh release --notes`, `gh gist`, and a `gh` call hidden behind `bash -c`, `eval` or a script file.
-PR review line comments sent through `gh api` are denied with no `gh-write` form to point at yet.
+A `gh api` reply to a PR review line comment is denied and pointed at `gh-write pr reply`.
 
 **Why this exists**, and why it isn't as simple as pointing ticketvoice's matcher at `gh` itself:
 ticketvoice reads a Bash `PreToolUse` call's `tool_input.command` — the same opaque shell string

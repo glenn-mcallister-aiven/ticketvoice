@@ -1,8 +1,9 @@
 // Command gh-write wraps `gh issue`/`gh pr` writes, forcing body text through stdin (a
 // quoted heredoc, e.g. `gh-write issue create --title T <<'EOF' ... EOF`) or a --body-file
-// gh-write reads itself, instead of a --body flag. `pr review <id>` posts a review, and `comment edit <id>` edits an
-// existing conversation comment through the REST API. Those are the two raw gh writes
-// ticketvoice's hook denies that had no gh-write form before.
+// gh-write reads itself, instead of a --body flag. `pr review <id>` posts a review, `comment edit <id>` edits an
+// existing conversation comment through the REST API, and `pr reply <pr> <comment-id>` answers a
+// review comment in its thread. Those are the raw gh writes ticketvoice's hook denies that had no
+// gh-write form before.
 //
 // The reason is ticketvoice, not gh-write itself. ticketvoice's PreToolUse hook gates
 // prose against a word budget and forwards it to cope/basanite, but for a Bash call it
@@ -86,13 +87,13 @@ func takeBodyFile(args []string) (rest []string, bodyPath, usageErr string) {
 
 func validateArgs(args []string) (ghArgs []string, usageErr string) {
 	if len(args) < 2 {
-		return nil, "usage: gh-write <issue|pr> <create|comment|edit> [id] [gh flags...]\n       gh-write pr review <id> [--approve|--comment|--request-changes] [gh flags...]\n       gh-write comment edit <comment-id> [--repo owner/repo]\n       the body comes from stdin, or from --body-file FILE"
+		return nil, "usage: gh-write <issue|pr> <create|comment|edit> [id] [gh flags...]\n       gh-write pr review <id> [--approve|--comment|--request-changes] [gh flags...]\n       gh-write pr reply <pr> <review-comment-id> [--repo owner/repo]\n       gh-write comment edit <comment-id> [--repo owner/repo]\n       the body comes from stdin, or from --body-file FILE"
 	}
 	object, verb := args[0], args[1]
 	switch object {
 	case "issue", "pr":
-		if verb != "create" && verb != "comment" && verb != "edit" && !(object == "pr" && verb == "review") {
-			return nil, fmt.Sprintf("gh-write: unsupported verb %q for %s (want create, comment, or edit; pr also takes review)", verb, object)
+		if verb != "create" && verb != "comment" && verb != "edit" && !(object == "pr" && (verb == "review" || verb == "reply")) {
+			return nil, fmt.Sprintf("gh-write: unsupported verb %q for %s (want create, comment, or edit; pr also takes review and reply)", verb, object)
 		}
 	case "comment":
 		if verb != "edit" {
@@ -109,6 +110,8 @@ func validateArgs(args []string) (ghArgs []string, usageErr string) {
 	switch {
 	case object == "comment":
 		return commentEditArgs(args[2:])
+	case verb == "reply":
+		return replyArgs(args[2:])
 	case verb == "review":
 		return reviewArgs(args), ""
 	}
@@ -155,6 +158,33 @@ func commentEditArgs(rest []string) (ghArgs []string, usageErr string) {
 		return nil, "usage: gh-write comment edit <comment-id> [--repo owner/repo]"
 	}
 	return []string{"api", "-X", "PATCH", "repos/" + repo + "/issues/comments/" + id, "-F", "body=@-"}, ""
+}
+
+// replyArgs answers one PR review comment in its own thread. gh has no command for that either, so
+// it goes through the REST replies endpoint, which needs the PR number as well as the comment id.
+// The id must be the thread's first comment: GitHub refuses a reply to a reply, and gh reports it.
+func replyArgs(rest []string) (ghArgs []string, usageErr string) {
+	const usage = "usage: gh-write pr reply <pr> <review-comment-id> [--repo owner/repo]"
+	repo := "{owner}/{repo}"
+	var ids []string
+	for i := 0; i < len(rest); i++ {
+		a := rest[i]
+		switch {
+		case (a == "--repo" || a == "-R") && i+1 < len(rest):
+			repo = rest[i+1]
+			i++
+		case strings.HasPrefix(a, "--repo="):
+			repo = strings.TrimPrefix(a, "--repo=")
+		case len(ids) < 2 && isDigits(a):
+			ids = append(ids, a)
+		default:
+			return nil, fmt.Sprintf("gh-write: pr reply takes a PR number, a comment id and --repo only, not %q", a)
+		}
+	}
+	if len(ids) != 2 {
+		return nil, usage
+	}
+	return []string{"api", "-X", "POST", "repos/" + repo + "/pulls/" + ids[0] + "/comments/" + ids[1] + "/replies", "-F", "body=@-"}, ""
 }
 
 func isDigits(s string) bool {

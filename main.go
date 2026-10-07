@@ -286,7 +286,7 @@ var (
 	// Exactly two groups, always both set: ghWriteProse slices them unconditionally, so an
 	// alternation that leaves one unset would panic, and a panicking hook blocks the call. A pair
 	// gh-write itself refuses (comment create) is scored here and then refused by gh-write.
-	ghWriteInvoke = regexp.MustCompile(`\bgh-write\s+(issue|pr|comment)\s+(create|comment|edit|review)\b`)
+	ghWriteInvoke = regexp.MustCompile(`\bgh-write\s+(issue|pr|comment)\s+(create|comment|edit|review|reply)\b`)
 	heredocOpener = ghcmd.HeredocOpener
 )
 
@@ -500,7 +500,7 @@ func trackerIdentity(raw json.RawMessage) string {
 
 // ghWriteTargetID matches the numeric id gh-write's own CLI grammar puts after comment/edit — the
 // issue or PR the call is already about, not one it's about to create.
-var ghWriteTargetID = regexp.MustCompile(`\b(?:issue|pr|comment)\s+(?:comment|edit|review)\s+(\d+)\b`)
+var ghWriteTargetID = regexp.MustCompile(`\b(?:issue|pr|comment)\s+(?:comment|edit|review|reply)\s+(\d+)\b`)
 
 // agentTagRune is budgetgate.AgentTag without its trailing space, for the already-tagged test. What
 // follows the emoji is the writer's business — a space, a newline, nothing — and only the emoji
@@ -962,7 +962,7 @@ func rawGhDenyReason(w ghcmd.Write) string {
 	case w.Object == "api":
 		return "This `gh api` call sends a body in a -f/-F field, which ticketvoice can't score, and gh-write has no form for it. " +
 			"Post a new issue or PR comment with `gh-write <issue|pr> comment <number>` and the body on stdin instead. " +
-			"PR review line comments have no gated path yet."
+			"To answer a PR review comment in its thread, use `gh-write pr reply <pr> <comment-id>`."
 	default:
 		head = fmt.Sprintf("This `gh %s %s` carries its body in a flag, which ticketvoice can't score.", w.Object, w.Verb)
 		parts := []string{"gh-write", w.Object, w.Verb}
