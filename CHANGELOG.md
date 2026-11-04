@@ -1,5 +1,26 @@
 # Changelog
 
+## A release note gets a check of its own — 2026-11-01
+
+`ticketvoice --check <file> -field release-note [-json]` checks a product release note: a word
+budget per entry (story 90, minor line 30), a story body sentence that repeats its summary (at
+least three of its content words, and 60% of them, already in the summary), `cope-gate` with the
+embedded `release_note.effigy` card, and `basanite`. Run over 58 published notes, the repeat check
+raised 19 flags across 193 entries; of six read, five repeated the summary and one added a host
+name the summary left out.
+
+## A ticket named in a reply must have been read since the last compaction — 2026-10-06
+
+`ticketvoice stop` also holds a turn whose text names a ticket id with no full read since the
+newest compaction boundary in the transcript. A full read is a `get_issue` from linear-strict,
+linear-official or linear-full, a `ticket-facts` run naming the id, or a `create_issue` whose
+result carries it. A list or search result doesn't count. The block names every stale id and the
+one batch command that refreshes them, and a turn already held once is let go, so an id that can't
+be read never loops. Keys come from `TICKETVOICE_FRESH_KEYS` (default `CUR`; empty turns it off).
+Replayed on jupiter's transcript up to its 2026-10-06 rerank, it names all 26 ids that reply cited,
+including the parked CUR-2729 it called red and the three finished tickets it listed as open work.
+Only lines after the boundary are decoded: 1.1 s on a 288k-line transcript, down from 7.6 s.
+
 ## Merge upstream's auto-rewrite removal into the Jira branch — 2026-10-06
 
 Upstream dropped auto-rewrite and `internal/autorewrite`; this branch had kept it Linear-only and
