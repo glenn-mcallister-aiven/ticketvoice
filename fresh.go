@@ -48,6 +48,26 @@ var createTools = map[string]bool{
 	"mcp__linear-strict__create_issue": true,
 }
 
+// The Atlassian MCP's server name depends on how it was added (`atlassian`,
+// `claude_ai_Atlassian_Rovo`), so Jira tools are matched on the method after the last `__`, the
+// same way main.go matches the Jira write tools. searchJiraIssuesUsingJql is left out for the same
+// reason list_issues is: a search result is a title and a status, which is what goes stale.
+
+// fullReadField names the input field holding the ticket id when tool reads a whole ticket.
+func fullReadField(tool string) (string, bool) {
+	if field, ok := fullReadTools[tool]; ok {
+		return field, true
+	}
+	if strings.HasSuffix(tool, "__getJiraIssue") {
+		return "issueIdOrKey", true
+	}
+	return "", false
+}
+
+func isCreateTool(tool string) bool {
+	return createTools[tool] || strings.HasSuffix(tool, "__createJiraIssue")
+}
+
 type transcriptEntry struct {
 	Type    string `json:"type"`
 	Subtype string `json:"subtype"`
@@ -156,7 +176,7 @@ func staleTicketMentions(transcriptPath string) []string {
 		for _, b := range bs {
 			switch {
 			case e.Type == "assistant" && b.Type == "tool_use":
-				if field, ok := fullReadTools[b.Name]; ok {
+				if field, ok := fullReadField(b.Name); ok {
 					var in map[string]any
 					if json.Unmarshal(b.Input, &in) == nil {
 						if v, ok := in[field].(string); ok {
@@ -169,12 +189,16 @@ func staleTicketMentions(transcriptPath string) []string {
 						read[id] = true
 					}
 				}
-				if createTools[b.Name] {
+				if isCreateTool(b.Name) {
 					pendingCreate[b.ID] = true
 				}
 			case e.Type == "user" && b.Type == "tool_result" && pendingCreate[b.ToolUseID]:
+				// Linear returns the new ticket as `identifier`; Jira passes through its REST
+				// create response, `{"id":"10042","key":"RE-24","self":"…"}`, where `id` is the
+				// numeric one nobody writes in prose.
 				var out struct {
 					Identifier string `json:"identifier"`
+					Key        string `json:"key"`
 				}
 				text := string(b.Content)
 				var parts []contentBlock
@@ -186,8 +210,12 @@ func staleTicketMentions(transcriptPath string) []string {
 						text = s
 					}
 				}
-				if json.Unmarshal([]byte(text), &out) == nil && out.Identifier != "" {
-					read[out.Identifier] = true
+				if json.Unmarshal([]byte(text), &out) == nil {
+					for _, id := range []string{out.Identifier, out.Key} {
+						if id != "" {
+							read[id] = true
+						}
+					}
 				}
 			case e.Type == "assistant" && b.Type == "text" && i > turnStart:
 				for _, id := range idRe.FindAllString(b.Text, -1) {
@@ -210,8 +238,8 @@ func staleTicketMentions(transcriptPath string) []string {
 func freshReason(stale []string) string {
 	return fmt.Sprintf("This turn names %s without a full read of %s since the last compaction. "+
 		"Whatever you said about %s came from memory or a summary, which is how parked tickets got "+
-		"reported as red and finished ones as open work. Read each with linear-strict get_issue "+
-		"(parallel calls are fine), or for status run `node web/scripts/ticket-facts.mjs %s`, then "+
+		"reported as red and finished ones as open work. Read each with linear-strict get_issue, "+
+		"or getJiraIssue for a Jira key (parallel calls are fine), or for Linear status run `node web/scripts/ticket-facts.mjs %s`, then "+
 		"correct anything your reply got wrong before ending the turn.",
 		strings.Join(stale, ", "), plural(len(stale), "it", "them"), plural(len(stale), "it", "them"),
 		strings.Join(stale, " "))

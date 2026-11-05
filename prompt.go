@@ -105,7 +105,7 @@ func promptNudge(transcriptPath, ticket string) string {
 		for _, b := range bs {
 			switch {
 			case e.Type == "assistant" && b.Type == "tool_use":
-				if field, ok := fullReadTools[b.Name]; ok {
+				if field, ok := fullReadField(b.Name); ok {
 					var in map[string]any
 					if json.Unmarshal(b.Input, &in) == nil {
 						if v, ok := in[field].(string); ok {
@@ -129,11 +129,11 @@ func promptNudge(transcriptPath, ticket string) string {
 	}
 	if !read[ticket] {
 		return "This branch's ticket " + ticket + " has not been read in full since the last compaction. " +
-			"Read it with linear-strict get_issue before answering about its design or status."
+			"Read it with linear-strict get_issue (getJiraIssue for a Jira key) before answering about its design or status."
 	}
 	if parent != "" && !planRead && !read[parent] {
 		return "This branch's ticket " + ticket + " was read, but its parent " + parent + " has not been read in full " +
-			"since the last compaction. Read " + parent + " with linear-strict get_issue before answering about the design or status."
+			"since the last compaction. Read " + parent + " with linear-strict get_issue (getJiraIssue for a Jira key) before answering about the design or status."
 	}
 	return ""
 }

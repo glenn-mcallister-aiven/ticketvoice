@@ -1,5 +1,12 @@
 # Changelog
 
+## The freshness checks count a Jira read — 2026-11-05
+
+A `getJiraIssue` on any Atlassian server now counts as a full read for both the `Stop` freshness
+check and the branch-ticket nudge, and a `createJiraIssue` result's `key` counts as read. A
+`searchJiraIssuesUsingJql` result doesn't, for the same reason a Linear list doesn't. Jira keys
+still have to be named in `TICKETVOICE_FRESH_KEYS` (e.g. `CUR,RE`); the default stays `CUR`.
+
 ## A release note gets a check of its own — 2026-11-01
 
 `ticketvoice --check <file> -field release-note [-json]` checks a product release note: a word

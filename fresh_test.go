@@ -142,3 +142,21 @@ func TestStopBlocksOnAStaleMentionOnceThenLetsTheTurnEnd(t *testing.T) {
 		t.Fatalf("a turn the hook already held must be allowed to end: %q", got)
 	}
 }
+
+// The Atlassian server name varies by how it was added, so the reads are matched on the method.
+func TestFreshCountsJiraReadsAndCreatesButNotASearch(t *testing.T) {
+	t.Setenv("TICKETVOICE_FRESH_KEYS", "RE")
+	p := writeTranscript(t,
+		tCompact,
+		tUser("status?"),
+		tToolUse("j1", "mcp__claude_ai_Atlassian_Rovo__getJiraIssue", `{"cloudId":"c","issueIdOrKey":"RE-1"}`),
+		tToolUse("j2", "mcp__atlassian__searchJiraIssuesUsingJql", `{"jql":"assignee = currentUser()"}`),
+		tToolResult("j2", `{"issues":[{"key":"RE-2","fields":{"status":{"name":"Done"}}}]}`),
+		tToolUse("j3", "mcp__atlassian__createJiraIssue", `{"projectKey":"RE","summary":"x"}`),
+		tToolResult("j3", `{"id":"10042","key":"RE-3","self":"https://x/rest/api/3/issue/10042"}`),
+		tAssistantText("RE-1 is in review, RE-2 is done, and I filed RE-3."),
+	)
+	if got := staleTicketMentions(p); !reflect.DeepEqual(got, []string{"RE-2"}) {
+		t.Fatalf("got %v, want only the searched RE-2 stale", got)
+	}
+}
