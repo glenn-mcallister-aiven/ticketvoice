@@ -88,3 +88,20 @@ func TestRunPromptFailsQuietAndEmitsHookJSON(t *testing.T) {
 		t.Fatalf("no git must print nothing: %q", out.String())
 	}
 }
+
+// A getJiraIssue result nests the parent at fields.parent.key, not at Linear's top-level parent.
+func TestPromptNamesAnUnreadJiraParent(t *testing.T) {
+	t.Setenv("TICKETVOICE_FRESH_KEYS", "SRE,RE")
+	jiraRead := func(id string) string {
+		return tToolUse("tu-"+id, "mcp__claude_ai_Atlassian_Rovo__getJiraIssue", `{"cloudId":"c","issueIdOrKey":"`+id+`"}`)
+	}
+	child := `{"id":"10042","key":"RE-24","fields":{"summary":"s","parent":{"id":"10001","key":"RE-7","fields":{"summary":"p"}}}}`
+	lines := []string{tCompact, tUser("go"), jiraRead("RE-24"), tToolResult("tu-RE-24", child)}
+	if got := promptNudge(writeTranscript(t, lines...), "RE-24"); !strings.Contains(got, "parent RE-7") {
+		t.Fatalf("an unread Jira parent must be named: %q", got)
+	}
+	lines = append(lines, jiraRead("RE-7"))
+	if got := promptNudge(writeTranscript(t, lines...), "RE-24"); got != "" {
+		t.Fatalf("a Jira parent read since compaction satisfies the check: %q", got)
+	}
+}

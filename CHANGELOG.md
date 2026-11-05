@@ -4,7 +4,9 @@
 
 A `getJiraIssue` on any Atlassian server now counts as a full read for both the `Stop` freshness
 check and the branch-ticket nudge, and a `createJiraIssue` result's `key` counts as read. A
-`searchJiraIssuesUsingJql` result doesn't, for the same reason a Linear list doesn't. Jira keys
+`searchJiraIssuesUsingJql` result doesn't, for the same reason a Linear list doesn't. The
+branch-ticket nudge also finds a Jira parent, at `fields.parent.key`, and asks for it to be read
+too. Jira keys
 still have to be named in `TICKETVOICE_FRESH_KEYS` (e.g. `CUR,RE`); the default stays `CUR`.
 
 ## A release note gets a check of its own — 2026-11-01

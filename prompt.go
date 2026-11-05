@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
 	"io"
 	"os/exec"
@@ -43,7 +44,7 @@ func gitBranch(cwd string) string {
 	return b
 }
 
-var parentRe = regexp.MustCompile(`"parent"\s*:\s*\{[^{}]*?"identifier"\s*:\s*"([A-Za-z]+-\d+)"`)
+var parentRe = regexp.MustCompile(`"parent"\s*:\s*\{[^{}]*?"(?:identifier|key)"\s*:\s*"([A-Za-z]+-\d+)"`)
 
 // resultText flattens a tool_result's content to text.
 func resultText(raw json.RawMessage) string {
@@ -71,11 +72,23 @@ func parentOf(text string) (parent string, hasPlan bool) {
 			s := strings.TrimSpace(string(pp))
 			hasPlan = s != "" && s != "null" && s != `""` && s != "{}"
 		}
+		// Linear puts the parent at the top level under `identifier`; a getJiraIssue result is
+		// Jira's issue shape, which nests it at `fields.parent` under `key`.
+		raw := m["parent"]
+		if raw == nil {
+			var f struct {
+				Parent json.RawMessage `json:"parent"`
+			}
+			if json.Unmarshal(m["fields"], &f) == nil {
+				raw = f.Parent
+			}
+		}
 		var p struct {
 			Identifier string `json:"identifier"`
+			Key        string `json:"key"`
 		}
-		if json.Unmarshal(m["parent"], &p) == nil {
-			parent = strings.ToUpper(p.Identifier)
+		if json.Unmarshal(raw, &p) == nil {
+			parent = strings.ToUpper(cmp.Or(p.Identifier, p.Key))
 		}
 		return parent, hasPlan
 	}
